@@ -39,13 +39,18 @@ const [reasonById, setReasonById] = useState<Record<string, AbsenceReason>>({})
 		)
 	}
 
+	const markedCount = currentSession.picks.filter((sid) => !!currentSession.marks[sid])?.length || 0
+	const allMarked = markedCount === currentSession.picks.length && currentSession.picks.length > 0
+
 	return (
 		<div className="page">
 			<h2>Session</h2>
 			<div className="banner">Carryovers included automatically (not capped).</div>
-			<div style={{ display: 'flex', gap: 8 }}>
+			<div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+				<span style={{ opacity: 0.8 }}>{markedCount}/{currentSession.picks.length} marked</span>
 				<button onClick={() => redrawRandom()} disabled={isLoading}>Re-draw</button>
 				<button
+					disabled={!allMarked || isLoading}
 					onClick={async () => {
 						await saveSession()
 						navigate('/')
@@ -61,17 +66,35 @@ const [reasonById, setReasonById] = useState<Record<string, AbsenceReason>>({})
 						<div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
 							Absences: {/* will compute quickly */}
 						</div>
-						<div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-							<button onClick={() => markStudent(sid, { status: 'present' })}>Present</button>
-							<button onClick={() => markStudent(sid, { status: 'absent', reason: reasonById[sid] ?? 'unexcused' })}>Absent</button>
-							<select
-								value={reasonById[sid] ?? 'unexcused'}
-								onChange={(e) => setReasonById({ ...reasonById, [sid]: e.target.value as AbsenceReason })}
-							>
-								<option value="unexcused">Unexcused</option>
-								<option value="excused">Excused</option>
-							</select>
-						</div>
+						{(() => {
+							const m = currentSession.marks[sid]
+							const isPresent = m?.status === 'present'
+							const isAbsent = m?.status === 'absent'
+							return (
+								<div className="toggle-group" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+									<button
+										className={isPresent ? 'selected present' : ''}
+										onClick={() => markStudent(sid, { status: 'present' })}
+									>
+										Present
+									</button>
+									<button
+										className={isAbsent ? 'selected absent' : ''}
+										onClick={() => markStudent(sid, { status: 'absent', reason: reasonById[sid] ?? 'unexcused' })}
+									>
+										Absent
+									</button>
+									<select
+										value={reasonById[sid] ?? 'unexcused'}
+										disabled={!isAbsent}
+										onChange={(e) => setReasonById({ ...reasonById, [sid]: e.target.value as AbsenceReason })}
+									>
+										<option value="unexcused">Unexcused</option>
+										<option value="excused">Excused</option>
+									</select>
+								</div>
+							)
+						})()}
 					</div>
 				))}
 			</div>

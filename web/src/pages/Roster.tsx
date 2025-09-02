@@ -6,12 +6,41 @@ import { parseRosterCsv, toStudentEntities } from '../utils/csv'
 
 export default function Roster() {
 	const { selectedClassId, getStudents } = useStore()
-	const [students, setStudents] = useState<{ id: string; displayName: string; absenceCount: number }[]>([])
+	const [students, setStudents] = useState<{ id: string; displayName: string; firstName?: string; lastName?: string; absenceCount: number }[]>([])
+	const [sortKey, setSortKey] = useState<'first' | 'last' | 'absences'>('first')
+	const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+
+	async function updateAbsenceCount(studentId: string, nextCount: number) {
+		const clamped = Math.max(0, Math.floor(nextCount))
+		await db.students.update(studentId, { absenceCount: clamped })
+		setStudents((prev) => prev.map((s) => (s.id === studentId ? { ...s, absenceCount: clamped } : s)))
+	}
 
 	useEffect(() => {
 		if (!selectedClassId) return
-		getStudents().then((s) => setStudents(s.map((x) => ({ id: x.id, displayName: x.displayName, absenceCount: x.absenceCount }))))
+		getStudents().then((s) =>
+			setStudents(
+				s.map((x) => ({ id: x.id, displayName: x.displayName, firstName: x.firstName, lastName: x.lastName, absenceCount: x.absenceCount })),
+			),
+		)
 	}, [selectedClassId, getStudents])
+
+	// Sorted copy for rendering
+	const sorted = [...students].sort((a, b) => {
+		if (sortKey === 'absences') {
+			const diff = (a.absenceCount || 0) - (b.absenceCount || 0)
+			return sortDir === 'asc' ? diff : -diff
+		}
+		const firstA = (a.firstName || a.displayName || '').toLowerCase()
+		const firstB = (b.firstName || b.displayName || '').toLowerCase()
+		const lastA = (a.lastName || a.displayName || '').toLowerCase()
+		const lastB = (b.lastName || b.displayName || '').toLowerCase()
+		const va = sortKey === 'first' ? firstA : lastA
+		const vb = sortKey === 'first' ? firstB : lastB
+		if (va < vb) return sortDir === 'asc' ? -1 : 1
+		if (va > vb) return sortDir === 'asc' ? 1 : -1
+		return 0
+	})
 
 	return (
 		<div className="page">
@@ -20,6 +49,23 @@ export default function Roster() {
 				<p>Select a class first.</p>
 			) : (
 				<>
+					<div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+						<label>
+							Sort by{' '}
+							<select value={sortKey} onChange={(e) => setSortKey(e.target.value as any)}>
+								<option value="first">First name</option>
+								<option value="last">Last name</option>
+								<option value="absences">Absences</option>
+							</select>
+						</label>
+						<label>
+							Order{' '}
+							<select value={sortDir} onChange={(e) => setSortDir(e.target.value as any)}>
+								<option value="asc">Ascending</option>
+								<option value="desc">Descending</option>
+							</select>
+						</label>
+					</div>
 					<div>
 						<input
 							type="file"
@@ -35,13 +81,33 @@ export default function Roster() {
 									}
 								})
 								const fresh = await getStudents()
-								setStudents(fresh.map((x) => ({ id: x.id, displayName: x.displayName, absenceCount: x.absenceCount })))
+								setStudents(
+									fresh.map((x) => ({ id: x.id, displayName: x.displayName, firstName: x.firstName, lastName: x.lastName, absenceCount: x.absenceCount })),
+								)
 							}}
 						/>
 					</div>
 					<div className="cards">
-						{students.map((s) => (
-							<div className="card" key={s.id}>{s.displayName} — absences: {s.absenceCount}</div>
+						{sorted.map((s) => (
+							<div className="card" key={s.id}>
+								<div style={{ fontWeight: 600, marginBottom: 8 }}>{s.displayName}</div>
+								<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+									<span>Absences:</span>
+									<button onClick={() => updateAbsenceCount(s.id, (s.absenceCount || 0) - 1)}>-</button>
+									<input
+										type="number"
+										min={0}
+										value={s.absenceCount || 0}
+										onChange={(e) => {
+											const val = Number(e.target.value)
+											setStudents((prev) => prev.map((it) => (it.id === s.id ? { ...it, absenceCount: isNaN(val) ? 0 : val } : it)))
+										}}
+										onBlur={(e) => updateAbsenceCount(s.id, Number(e.target.value))}
+										style={{ width: 80 }}
+									/>
+									<button onClick={() => updateAbsenceCount(s.id, (s.absenceCount || 0) + 1)}>+</button>
+								</div>
+							</div>
 						))}
 					</div>
 				</>
