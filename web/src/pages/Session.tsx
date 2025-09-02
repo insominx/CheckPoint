@@ -40,15 +40,12 @@ const [reasonById, setReasonById] = useState<Record<string, AbsenceReason>>({})
 	}
 
 	return (
-		<div style={{ padding: 16 }}>
+		<div className="page">
 			<h2>Session</h2>
-			<div style={{ marginBottom: 8 }}>
-				<div style={{ marginBottom: 8, padding: 8, background: '#fff8e1', border: '1px solid #ffe082' }}>
-					Carryovers included automatically (not capped).
-				</div>
+			<div className="banner">Carryovers included automatically (not capped).</div>
+			<div style={{ display: 'flex', gap: 8 }}>
 				<button onClick={() => redrawRandom()} disabled={isLoading}>Re-draw</button>
 				<button
-					style={{ marginLeft: 8 }}
 					onClick={async () => {
 						await saveSession()
 						navigate('/')
@@ -57,9 +54,9 @@ const [reasonById, setReasonById] = useState<Record<string, AbsenceReason>>({})
 					Save
 				</button>
 			</div>
-			<div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
+			<div className="cards">
 				{currentSession.picks.map((sid) => (
-					<div key={sid} style={{ border: '1px solid #ccc', padding: 12, borderRadius: 8 }}>
+					<div key={sid} className="card">
 						<div style={{ marginBottom: 8, fontWeight: 600 }}>{studentNamesById[sid] ?? sid}</div>
 						<div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
 							Absences: {/* will compute quickly */}

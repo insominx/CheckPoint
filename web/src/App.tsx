@@ -8,20 +8,24 @@ import Roster from './pages/Roster'
 export default function App() {
 	return (
 		<div>
-			<nav style={{ display: 'flex', gap: 12, padding: 12, borderBottom: '1px solid #eee' }}>
-				<Link to="/">Home</Link>
-				<Link to="/session">Session</Link>
-				<Link to="/history">History</Link>
-				<Link to="/settings">Settings</Link>
-				<Link to="/roster">Roster</Link>
+			<nav className="top-nav">
+				<div className="container nav-links">
+					<Link to="/">Home</Link>
+					<Link to="/session">Session</Link>
+					<Link to="/history">History</Link>
+					<Link to="/settings">Settings</Link>
+					<Link to="/roster">Roster</Link>
+				</div>
 			</nav>
-			<Routes>
-				<Route path="/" element={<Home />} />
-				<Route path="/session" element={<Session />} />
-				<Route path="/history" element={<History />} />
-				<Route path="/settings" element={<Settings />} />
-				<Route path="/roster" element={<Roster />} />
-			</Routes>
+			<main className="container">
+				<Routes>
+					<Route path="/" element={<Home />} />
+					<Route path="/session" element={<Session />} />
+					<Route path="/history" element={<History />} />
+					<Route path="/settings" element={<Settings />} />
+					<Route path="/roster" element={<Roster />} />
+				</Routes>
+			</main>
 		</div>
 	)
 }

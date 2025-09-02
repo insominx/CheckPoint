@@ -23,9 +23,9 @@ export default function History() {
 	}, [selectedClassId])
 
 	return (
-		<div style={{ padding: 16 }}>
+		<div className="page">
 			<h2>History</h2>
-			<div style={{ marginBottom: 8 }}>
+			<div>
 				<button
 					onClick={async () => {
 						if (!selectedClassId) return

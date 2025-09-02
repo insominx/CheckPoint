@@ -12,7 +12,7 @@ export default function Home() {
 	}, [loadClasses])
 
 	return (
-		<div style={{ padding: 16 }}>
+		<div className="page">
 			<h1>CheckPoint</h1>
 			<div>
 				<label>
@@ -50,14 +50,16 @@ export default function Home() {
 					</button>
 				</div>
 			</div>
-			<div style={{ marginTop: 16 }}>
+			<div>
 				<p>Default N: {currentN}</p>
-				<Link to="/session">
-					<button disabled={!selectedClassId}>Pick Students</button>
-				</Link>
-				<Link to="/roster" style={{ marginLeft: 8 }}>
-					<button disabled={!selectedClassId}>Manage Roster</button>
-				</Link>
+				<div style={{ display: 'flex', gap: 8 }}>
+					<Link to="/session">
+						<button disabled={!selectedClassId}>Pick Students</button>
+					</Link>
+					<Link to="/roster">
+						<button disabled={!selectedClassId}>Manage Roster</button>
+					</Link>
+				</div>
 			</div>
 		</div>
 	)

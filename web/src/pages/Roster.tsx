@@ -14,13 +14,13 @@ export default function Roster() {
 	}, [selectedClassId, getStudents])
 
 	return (
-		<div style={{ padding: 16 }}>
+		<div className="page">
 			<h2>Roster</h2>
 			{!selectedClassId ? (
 				<p>Select a class first.</p>
 			) : (
 				<>
-					<div style={{ marginBottom: 12 }}>
+					<div>
 						<input
 							type="file"
 							accept=".csv"
@@ -39,11 +39,11 @@ export default function Roster() {
 							}}
 						/>
 					</div>
-					<ul>
+					<div className="cards">
 						{students.map((s) => (
-							<li key={s.id}>{s.displayName} — absences: {s.absenceCount}</li>
+							<div className="card" key={s.id}>{s.displayName} — absences: {s.absenceCount}</div>
 						))}
-					</ul>
+					</div>
 				</>
 			)}
 		</div>
