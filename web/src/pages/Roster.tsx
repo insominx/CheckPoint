@@ -14,6 +14,13 @@ export default function Roster() {
 		const clamped = Math.max(0, Math.floor(nextCount))
 		await db.students.update(studentId, { absenceCount: clamped })
 		setStudents((prev) => prev.map((s) => (s.id === studentId ? { ...s, absenceCount: clamped } : s)))
+		// If count is zero, also clear ledger entries for this student in this class to remove carryover
+		if (clamped === 0 && selectedClassId) {
+			const items = await db.ledger.where('classId').equals(selectedClassId).and((l) => l.studentId === studentId).toArray()
+			if (items.length) {
+				await db.ledger.bulkDelete(items.map((i) => i.id))
+			}
+		}
 	}
 
 	useEffect(() => {

@@ -61,8 +61,11 @@ const [reasonById, setReasonById] = useState<Record<string, AbsenceReason>>({})
 			</div>
 			<div className="cards">
 				{currentSession.picks.map((sid) => (
-					<div key={sid} className="card">
+					<div key={sid} className={`card ${currentSession.carryoverIds?.includes(sid) ? 'carryover' : ''}`}>
 						<div style={{ marginBottom: 8, fontWeight: 600 }}>{studentNamesById[sid] ?? sid}</div>
+						{currentSession.carryoverIds?.includes(sid) ? (
+							<div style={{ fontSize: 12, color: '#fbbf24', marginBottom: 8 }}>Carryover</div>
+						) : null}
 						<div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
 							Absences: {/* will compute quickly */}
 						</div>

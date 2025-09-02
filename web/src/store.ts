@@ -29,6 +29,8 @@ interface Actions {
 	redrawRandom: () => Promise<void>
 	markStudent: (studentId: string, mark: Mark) => void
 	saveSession: () => Promise<void>
+	deleteSession: (sessionId: string) => Promise<void>
+	clearHistoryForClass: () => Promise<void>
 }
 
 type Store = UIState & Actions
@@ -136,13 +138,15 @@ export const useStore = create<Store>((set, get) => ({
 
 			const n = get().currentN
 			const randomIds = weightedSampleWithoutReplacement(weighted, n)
-			const picks = Array.from(new Set<string>([...carryovers.map((s) => s.id), ...randomIds]))
+			const carryoverIds = carryovers.map((s) => s.id)
+			const picks = Array.from(new Set<string>([...carryoverIds, ...randomIds]))
 
 			const session: SessionEntity = {
 				id: uuidv4(),
 				classId,
 				date: new Date().toISOString(),
 				picks,
+				carryoverIds,
 				marks: {},
 			}
 			set({ currentSession: session })
@@ -168,16 +172,19 @@ export const useStore = create<Store>((set, get) => ({
 		const session = get().currentSession
 		const classId = get().selectedClassId
 		if (!session || !classId) return
+		const nowISO = new Date().toISOString()
+		const sessionToSave: SessionEntity = { ...session, date: nowISO }
 		await db.transaction('rw', db.sessions, db.ledger, db.students, async () => {
-			await db.sessions.add(session)
+			await db.sessions.add(sessionToSave)
 			const absentEntries: AbsenceLedgerItem[] = []
-			for (const [sid, mark] of Object.entries(session.marks)) {
+			for (const [sid, mark] of Object.entries(sessionToSave.marks)) {
 				if (mark.status === 'absent') {
 					absentEntries.push({
 						id: uuidv4(),
 						classId,
 						studentId: sid,
-						date: session.date,
+						date: sessionToSave.date,
+						sessionId: sessionToSave.id,
 						reason: mark.reason,
 					})
 				}
@@ -199,10 +206,13 @@ export const useStore = create<Store>((set, get) => ({
 			if (settings?.csvFileHandle) {
 				const handle: any = settings.csvFileHandle as any
 				const writable = await handle.createWritable()
-				const absentRows = Object.entries(session.marks)
+				const classStudents = await db.students.where('classId').equals(classId).toArray()
+				const nameById = new Map<string, string>(classStudents.map((s) => [s.id, s.displayName]))
+				const absentRows = Object.entries(sessionToSave.marks)
 					.filter(([, m]) => m.status === 'absent')
 					.map(([sid, m]) => {
-						return `${session.date},${sid},,ABSENT,${m.reason ?? ''}\n`
+						const name = nameById.get(sid) ?? ''
+						return `${sessionToSave.date},${sid},${name},ABSENT,${m.reason ?? ''}\n`
 					})
 				await writable.write(absentRows.join(''))
 				await writable.close()
@@ -211,6 +221,41 @@ export const useStore = create<Store>((set, get) => ({
 			// ignore FS API failures (optional feature)
 		}
 		set({ currentSession: undefined })
+	},
+
+	async deleteSession(sessionId) {
+		const classId = get().selectedClassId
+		if (!classId) return
+		await db.transaction('rw', db.sessions, db.ledger, db.students, async () => {
+			const session = await db.sessions.get(sessionId)
+			if (!session || session.classId !== classId) return
+			await db.sessions.delete(sessionId)
+			const ledgerToDelete = await db.ledger.where({ classId, sessionId }).toArray()
+			if (ledgerToDelete.length) {
+				await db.ledger.bulkDelete(ledgerToDelete.map((l) => l.id))
+				// decrement absence counts for those students
+				const idToDecrement = ledgerToDelete.map((l) => l.studentId)
+				const students = await db.students.bulkGet(idToDecrement)
+				const updates = students
+					.filter((s): s is StudentEntity => !!s)
+					.map((s) => ({ ...s, absenceCount: Math.max(0, (s.absenceCount || 0) - 1) }))
+				await db.students.bulkPut(updates)
+			}
+		})
+	},
+
+	async clearHistoryForClass() {
+		const classId = get().selectedClassId
+		if (!classId) return
+		await db.transaction('rw', db.sessions, db.ledger, db.students, async () => {
+			const sessions = await db.sessions.where('classId').equals(classId).primaryKeys()
+			if (sessions.length) await db.sessions.bulkDelete(sessions as string[])
+			const ledgerIds = await db.ledger.where('classId').equals(classId).primaryKeys()
+			if (ledgerIds.length) await db.ledger.bulkDelete(ledgerIds as string[])
+			// reset absence counts to 0 for this class
+			const classStudents = await db.students.where('classId').equals(classId).toArray()
+			await db.students.bulkPut(classStudents.map((s) => ({ ...s, absenceCount: 0 })))
+		})
 	},
 }))
 

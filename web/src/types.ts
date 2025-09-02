@@ -36,6 +36,10 @@ export interface SessionEntity {
 	 */
 	picks: string[]
 	/**
+	 * Subset of picks that are carryovers (derived from ledger)
+	 */
+	carryoverIds?: string[]
+	/**
 	 * A mapping of studentId -> mark for this session
 	 */
 	marks: Record<string, Mark>
@@ -46,6 +50,7 @@ export interface AbsenceLedgerItem {
 	classId: string
 	studentId: string
 	date: string // ISO string
+	sessionId?: string
 	reason?: AbsenceReason
 	notes?: string
 }

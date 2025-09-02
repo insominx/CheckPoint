@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { useStore } from '../store'
 
 export default function Home() {
-	const { loadClasses, createClass, selectClass, selectedClassId, currentN } = useStore()
+	const { loadClasses, createClass, selectClass, selectedClassId } = useStore()
 	const [classes, setClasses] = useState<{ id: string; name: string }[]>([])
 	const [newClassName, setNewClassName] = useState('')
 
@@ -51,15 +51,9 @@ export default function Home() {
 				</div>
 			</div>
 			<div>
-				<p>Default N: {currentN}</p>
-				<div style={{ display: 'flex', gap: 8 }}>
-					<Link to="/session">
-						<button disabled={!selectedClassId}>Pick Students</button>
-					</Link>
-					<Link to="/roster">
-						<button disabled={!selectedClassId}>Manage Roster</button>
-					</Link>
-				</div>
+				<Link to="/session">
+					<button disabled={!selectedClassId}>Pick Students</button>
+				</Link>
 			</div>
 		</div>
 	)
