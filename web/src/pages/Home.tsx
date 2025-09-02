@@ -13,7 +13,10 @@ export default function Home() {
 
 	return (
 		<div className="page">
-			<h1>CheckPoint</h1>
+			<div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+				<img src="/logo.png" alt="CheckPoint" width={56} height={56} style={{ borderRadius: 12 }} />
+				<h1 style={{ margin: 0 }}>CheckPoint</h1>
+			</div>
 			<div>
 				<label>
 					Class:
