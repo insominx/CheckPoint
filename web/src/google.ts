@@ -148,8 +148,8 @@ export async function createAndInitSpreadsheetForCheckPoint(title: string): Prom
 			'id','classId','firstName','lastName','displayName',
 			'externalId','loginId','sisId','notes','absenceCount',
 		],
-		Sessions: ['id','classId','date','picksCSV','picksNamesCSV','carryoverCSV','carryoverNamesCSV'],
-		Marks: ['sessionId','studentId','displayName','status','reason'],
+		Sessions: ['id','classId','date','createdAt','savedAt','picksCSV','picksNamesCSV','carryoverCSV','carryoverNamesCSV'],
+		Marks: ['sessionId','studentId','displayName','status','reason','markedAt'],
 		Ledger: ['id','classId','studentId','displayName','date','sessionId','reason','notes'],
 		Settings: ['classId','defaultN','neverSeenWeight','cooldownWeight'],
 	}
@@ -178,6 +178,41 @@ export async function appendRows(
 	})
 	console.log(LOG_PREFIX, 'Append OK', { sheet, updates: (res as any)?.updates })
 	return res
+}
+
+export async function readValues(spreadsheetId: string, rangeA1: string): Promise<(string | null)[][]> {
+	const token = await getAccessToken()
+	const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(rangeA1)}?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING`
+	console.log(LOG_PREFIX, 'Reading values', { rangeA1 })
+	const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+	if (!res.ok) {
+		const txt = await res.text().catch(() => '')
+		throw new Error(`Read failed ${res.status}: ${txt || res.statusText}`)
+	}
+	const json = await res.json()
+	const rows = (json?.values as any[]) || []
+	return rows
+}
+
+export async function clearSheetData(spreadsheetId: string, sheet: string): Promise<void> {
+	console.log(LOG_PREFIX, 'Clearing sheet data', { sheet })
+	const token = await getAccessToken()
+	const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(sheet + '!A2:Z')}:clear`
+	const res = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+	if (!res.ok) {
+		const txt = await res.text().catch(() => '')
+		console.warn(LOG_PREFIX, 'Clear sheet data failed', { sheet, status: res.status, body: txt?.slice(0, 200) })
+	}
+}
+
+export async function ensureSpreadsheet(spreadsheetTitle: string, preferredId?: string): Promise<string> {
+	// If preferredId is provided and exists, return it; otherwise create a new one
+	if (preferredId && (await spreadsheetExists(preferredId))) {
+		console.log(LOG_PREFIX, 'ensureSpreadsheet: using existing preferredId')
+		return preferredId
+	}
+	console.log(LOG_PREFIX, 'ensureSpreadsheet: creating new spreadsheet', { spreadsheetTitle })
+	return createAndInitSpreadsheetForCheckPoint(spreadsheetTitle)
 }
 
 export async function spreadsheetExists(spreadsheetId: string): Promise<boolean> {
@@ -266,8 +301,8 @@ export async function ensureCheckpointSheets(spreadsheetId: string): Promise<voi
 			'id','classId','firstName','lastName','displayName',
 			'externalId','loginId','sisId','notes','absenceCount',
 		],
-		Sessions: ['id','classId','date','picksCSV','picksNamesCSV','carryoverCSV','carryoverNamesCSV'],
-		Marks: ['sessionId','studentId','displayName','status','reason'],
+		Sessions: ['id','classId','date','createdAt','savedAt','picksCSV','picksNamesCSV','carryoverCSV','carryoverNamesCSV'],
+		Marks: ['sessionId','studentId','displayName','status','reason','markedAt'],
 		Ledger: ['id','classId','studentId','displayName','date','sessionId','reason','notes'],
 		Settings: ['classId','defaultN','neverSeenWeight','cooldownWeight'],
 	}

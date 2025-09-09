@@ -25,12 +25,18 @@ export type AttendanceStatus = 'present' | 'absent'
 export interface Mark {
 	status: AttendanceStatus
 	reason?: AbsenceReason
+	/** ISO timestamp when this mark was set */
+	markedAt?: string
 }
 
 export interface SessionEntity {
 	id: string
 	classId: string
 	date: string // ISO string
+	/** ISO timestamp when the session object was first created */
+	createdAt?: string
+	/** ISO timestamp when the session was saved (finalized) */
+	savedAt?: string
 	/**
 	 * Set of student IDs shown in this session (carryovers ∪ random draw)
 	 */

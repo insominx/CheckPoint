@@ -4,7 +4,7 @@ import { db } from '../db'
 import { createAndInitSpreadsheetForCheckPoint, getAccessToken, normalizeAndValidateSpreadsheetId, ensureCheckpointSheets } from '../google'
 
 export default function Settings() {
-	const { selectedClassId } = useStore()
+	const { selectedClassId, exportCurrentClassToSheets, importCurrentClassFromSheets } = useStore()
 	const [defaultN, setDefaultN] = useState(5)
 	const [neverSeenWeight, setNeverSeenWeight] = useState(2)
 	const [cooldownWeight, setCooldownWeight] = useState(0.5)
@@ -190,6 +190,72 @@ export default function Settings() {
 					{spreadsheetId ? (
 						<p style={{ marginTop: 8 }}>Using Spreadsheet: <code>{spreadsheetId}</code></p>
 					) : null}
+					<div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+						<button
+							disabled={busy || !selectedClassId}
+							onClick={async () => {
+								try {
+									setBusy(true)
+									await getAccessToken([
+										'https://www.googleapis.com/auth/spreadsheets',
+										'https://www.googleapis.com/auth/drive.file',
+									])
+									console.log('[Settings]', 'Triggering exportCurrentClassToSheets')
+									await exportCurrentClassToSheets()
+								} catch (e) {
+									console.error('[Settings]', 'Sync failed', e)
+									alert((e as Error).message)
+								} finally {
+									setBusy(false)
+								}
+							}}
+						>
+							Sync to Google Sheets
+						</button>
+						<button
+							disabled={busy || !selectedClassId}
+							onClick={async () => {
+								try {
+									setBusy(true)
+									await getAccessToken([
+										'https://www.googleapis.com/auth/spreadsheets',
+										'https://www.googleapis.com/auth/drive.file',
+									])
+									console.log('[Settings]', 'Triggering importCurrentClassFromSheets')
+									await importCurrentClassFromSheets()
+								} catch (e) {
+									console.error('[Settings]', 'Import failed', e)
+									alert((e as Error).message)
+								} finally {
+									setBusy(false)
+								}
+							}}
+						>
+							Import from Google Sheets (overwrite)
+						</button>
+						<button
+							style={{ opacity: 0.8 }}
+							disabled={busy || !selectedClassId}
+							onClick={async () => {
+								try {
+									setBusy(true)
+									await getAccessToken([
+										'https://www.googleapis.com/auth/spreadsheets',
+										'https://www.googleapis.com/auth/drive.file',
+									])
+									console.log('[Settings]', 'Triggering exportCurrentClassToSheets with recreate')
+									await exportCurrentClassToSheets({ recreate: true })
+								} catch (e) {
+									console.error('[Settings]', 'Full resync failed', e)
+									alert((e as Error).message)
+								} finally {
+									setBusy(false)
+								}
+							}}
+						>
+							Full Recreate & Sync
+						</button>
+					</div>
 				</div>
 				</>
 			)}

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 import { db } from './db'
-import { appendRows, normalizeAndValidateSpreadsheetId, ensureCheckpointSheets, spreadsheetExists } from './google'
+import { appendRows, ensureCheckpointSheets, ensureSpreadsheet, clearSheetData, readValues, normalizeAndValidateSpreadsheetId } from './google'
 import type { AbsenceLedgerItem, ClassEntity, Mark, SessionEntity, StudentEntity } from './types'
 import { weightedSampleWithoutReplacement } from './sampling'
 
@@ -32,6 +32,8 @@ interface Actions {
 	saveSession: () => Promise<void>
 	deleteSession: (sessionId: string) => Promise<void>
 	clearHistoryForClass: () => Promise<void>
+	exportCurrentClassToSheets: (opts?: { recreate?: boolean }) => Promise<void>
+	importCurrentClassFromSheets: () => Promise<void>
 }
 
 type Store = UIState & Actions
@@ -166,36 +168,16 @@ export const useStore = create<Store>((set, get) => ({
 	markStudent(studentId, mark) {
 		const current = get().currentSession
 		if (!current) return
-		const updated: SessionEntity = { ...current, marks: { ...current.marks, [studentId]: mark } }
+		const stamped: Mark = { ...mark, markedAt: new Date().toISOString() }
+		const updated: SessionEntity = { ...current, marks: { ...current.marks, [studentId]: stamped } }
 		set({ currentSession: updated })
 	},
 	async saveSession() {
 		const session = get().currentSession
 		const classId = get().selectedClassId
 		if (!session || !classId) return
-		// Require a valid, existing Google Sheet before saving attendance
-		{
-			const s = await db.settings.get(classId)
-			const idRaw = (s as any)?.spreadsheetId as string | undefined
-			console.log('[Store]', 'Pre-save sheet check', { classId, idRaw })
-			if (!idRaw) {
-				console.warn('[Store]', 'No spreadsheetId configured for class; blocking save')
-				// eslint-disable-next-line no-alert
-				alert('Google Sheets is not configured for this class. Open Settings and create or save a Spreadsheet ID first.')
-				throw new Error('SHEETS_NOT_CONFIGURED')
-			}
-			const id = normalizeAndValidateSpreadsheetId(idRaw)
-			const exists = await spreadsheetExists(id)
-			console.log('[Store]', 'Spreadsheet existence result', { id, exists })
-			if (!exists) {
-				console.warn('[Store]', 'Spreadsheet missing or inaccessible; blocking save')
-				// eslint-disable-next-line no-alert
-				alert('The configured Spreadsheet ID does not exist or you no longer have access. Open Settings to create a new sheet or save a different ID.')
-				throw new Error('SHEETS_NOT_FOUND')
-			}
-		}
 		const nowISO = new Date().toISOString()
-		const sessionToSave: SessionEntity = { ...session, date: nowISO }
+		const sessionToSave: SessionEntity = { ...session, date: nowISO, savedAt: nowISO, createdAt: session.createdAt ?? session.date ?? nowISO }
 		await db.transaction('rw', db.sessions, db.ledger, db.students, async () => {
 			await db.sessions.add(sessionToSave)
 			const absentEntries: AbsenceLedgerItem[] = []
@@ -223,77 +205,6 @@ export const useStore = create<Store>((set, get) => ({
 			}
 		})
 
-		// Dual-write to Google Sheets if configured
-		try {
-			const settings = await db.settings.get(classId)
-			const spreadsheetIdRaw = (settings as any)?.spreadsheetId as string | undefined
-			const spreadsheetId = spreadsheetIdRaw ? normalizeAndValidateSpreadsheetId(spreadsheetIdRaw) : undefined
-			if (spreadsheetId) {
-				console.log('[Store]', 'Saving to Google Sheets', { spreadsheetId, sessionId: sessionToSave.id })
-				await ensureCheckpointSheets(spreadsheetId)
-				const classStudents = await db.students.where('classId').equals(classId).toArray()
-				const nameById = new Map<string, string>(classStudents.map((s) => [s.id, s.displayName]))
-				const picksCSV = sessionToSave.picks.join(',')
-				const picksNamesCSV = sessionToSave.picks.map((sid) => nameById.get(sid) ?? '').join(',')
-				const carryoverCSV = (sessionToSave.carryoverIds || []).join(',')
-				const carryoverNamesCSV = (sessionToSave.carryoverIds || []).map((sid) => nameById.get(sid) ?? '').join(',')
-				// Sessions row
-				await appendRows(spreadsheetId, 'Sessions', [[
-					sessionToSave.id,
-					sessionToSave.classId,
-					sessionToSave.date,
-					picksCSV,
-					picksNamesCSV,
-					carryoverCSV,
-					carryoverNamesCSV,
-				]])
-				// Marks rows (append only if any marks exist)
-				const markEntries = Object.entries(sessionToSave.marks)
-				if (markEntries.length) {
-					const markRows: (string | null)[][] = []
-					for (const [sid, mark] of markEntries) {
-						markRows.push([
-							sessionToSave.id,
-							sid,
-							nameById.get(sid) ?? '',
-							mark.status,
-							mark.reason ?? null,
-						])
-					}
-					await appendRows(spreadsheetId, 'Marks', markRows)
-				}
-				// Ledger rows (append only if any absent marks exist)
-				{
-					const absents = Object.entries(sessionToSave.marks).filter(([, m]) => m.status === 'absent')
-					if (absents.length) {
-						const ledgerRows: (string | null)[][] = []
-						for (const [sid, mark] of absents) {
-							ledgerRows.push([
-								/* id */ '',
-								classId,
-								sid,
-								nameById.get(sid) ?? '',
-								sessionToSave.date,
-								sessionToSave.id,
-								mark.reason ?? null,
-								null,
-							])
-						}
-						await appendRows(spreadsheetId, 'Ledger', ledgerRows)
-					}
-				}
-				// Basic success notice for manual testing
-				// Using alert here to make it obvious in the UI without extra components
-				// eslint-disable-next-line no-alert
-				alert('Saved to Google Sheets successfully.')
-			} else {
-				console.log('[Store]', 'No spreadsheetId configured; skipping Google Sheets write')
-			}
-		} catch (e) {
-			console.error('[Store]', 'Google Sheets write failed', e)
-			// eslint-disable-next-line no-alert
-			alert(`Google Sheets write failed: ${(e as Error).message}`)
-		}
 		// Attempt CSV append via File System Access API if configured
 		try {
 			const settings = await db.settings.get(classId)
@@ -350,6 +261,236 @@ export const useStore = create<Store>((set, get) => ({
 			const classStudents = await db.students.where('classId').equals(classId).toArray()
 			await db.students.bulkPut(classStudents.map((s) => ({ ...s, absenceCount: 0 })))
 		})
+	},
+
+	async exportCurrentClassToSheets(opts) {
+		const classId = get().selectedClassId
+		if (!classId) return
+		set({ isLoading: true, error: undefined })
+		try {
+			const cls = await db.classes.get(classId)
+			const settings = (await db.settings.get(classId)) as any
+			const preferredId = settings?.spreadsheetId as string | undefined
+			const title = `CheckPoint — ${cls?.name || classId}`
+			console.log('[Store]', 'Export start', { classId, title, preferredId, opts })
+			const spreadsheetId = await ensureSpreadsheet(title, opts?.recreate ? undefined : preferredId)
+			await ensureCheckpointSheets(spreadsheetId)
+			// Clear data rows (keep headers) for deterministic export
+			await Promise.all([
+				clearSheetData(spreadsheetId, 'Classes'),
+				clearSheetData(spreadsheetId, 'Students'),
+				clearSheetData(spreadsheetId, 'Sessions'),
+				clearSheetData(spreadsheetId, 'Marks'),
+				clearSheetData(spreadsheetId, 'Ledger'),
+				clearSheetData(spreadsheetId, 'Settings'),
+			])
+			// Gather data
+			const [classes, students, sessions, ledger, perClassSettings] = await Promise.all([
+				db.classes.toArray(),
+				db.students.where('classId').equals(classId).toArray(),
+				db.sessions.where('classId').equals(classId).toArray(),
+				db.ledger.where('classId').equals(classId).toArray(),
+				db.settings.get(classId),
+			])
+			const nameById = new Map<string, string>(students.map((s) => [s.id, s.displayName]))
+			// Write Classes (only this class)
+			const clsRow = classes.find((c) => c.id === classId)
+			if (clsRow) await appendRows(spreadsheetId, 'Classes', [[clsRow.id, clsRow.name, clsRow.defaultN]])
+			// Write Students
+			if (students.length) {
+				await appendRows(
+					spreadsheetId,
+					'Students',
+					students.map((s) => [
+						s.id,
+						s.classId,
+						s.firstName ?? '',
+						s.lastName ?? '',
+						s.displayName,
+						s.externalId ?? '',
+						s.loginId ?? '',
+						s.sisId ?? '',
+						s.notes ?? '',
+						s.absenceCount ?? 0,
+					]),
+				)
+			}
+			// Write Sessions + Marks
+			sessions.sort((a, b) => Date.parse(a.date) - Date.parse(b.date))
+			for (const s of sessions) {
+				const picksCSV = s.picks.join(',')
+				const picksNamesCSV = s.picks.map((id) => nameById.get(id) ?? '').join(',')
+				const carryoverCSV = (s.carryoverIds || []).join(',')
+				const carryoverNamesCSV = (s.carryoverIds || []).map((id) => nameById.get(id) ?? '').join(',')
+				await appendRows(spreadsheetId, 'Sessions', [[s.id, s.classId, s.date, s.createdAt ?? '', s.savedAt ?? '', picksCSV, picksNamesCSV, carryoverCSV, carryoverNamesCSV]])
+				const markRows: (string | null)[][] = []
+				for (const [sid, mark] of Object.entries(s.marks)) {
+					markRows.push([s.id, sid, nameById.get(sid) ?? '', mark.status, mark.reason ?? null, (mark as any).markedAt ?? null])
+				}
+				if (markRows.length) await appendRows(spreadsheetId, 'Marks', markRows)
+			}
+			// Write Ledger
+			if (ledger.length) {
+				await appendRows(
+					spreadsheetId,
+					'Ledger',
+					ledger.map((l) => [
+						l.id,
+						l.classId,
+						l.studentId,
+						nameById.get(l.studentId) ?? '',
+						l.date,
+						l.sessionId ?? '',
+						l.reason ?? null,
+						l.notes ?? null,
+					]),
+				)
+			}
+			// Write Settings row for this class
+			if (perClassSettings) {
+				await appendRows(spreadsheetId, 'Settings', [[
+					perClassSettings.classId,
+					perClassSettings.defaultN,
+					perClassSettings.neverSeenWeight,
+					perClassSettings.cooldownWeight,
+				]])
+			}
+			// Persist spreadsheetId if changed
+			if (spreadsheetId && preferredId !== spreadsheetId) {
+				await db.settings.put({ ...(perClassSettings || { classId }), defaultN: perClassSettings?.defaultN ?? 5, neverSeenWeight: perClassSettings?.neverSeenWeight ?? 2, cooldownWeight: perClassSettings?.cooldownWeight ?? 0.5, spreadsheetId })
+			}
+			// eslint-disable-next-line no-alert
+			alert('Sync to Google Sheets completed.')
+		} catch (e) {
+			console.error('[Store]', 'Export failed', e)
+			// eslint-disable-next-line no-alert
+			alert(`Sync failed: ${(e as Error).message}`)
+		} finally {
+			set({ isLoading: false })
+		}
+	},
+
+	async importCurrentClassFromSheets() {
+		const classId = get().selectedClassId
+		if (!classId) return
+		set({ isLoading: true, error: undefined })
+		try {
+			const st = (await db.settings.get(classId)) as any
+			const idRaw = st?.spreadsheetId as string | undefined
+			if (!idRaw) throw new Error('No Spreadsheet ID configured for this class')
+			const spreadsheetId = normalizeAndValidateSpreadsheetId(idRaw)
+			await ensureCheckpointSheets(spreadsheetId)
+			// Read headers to verify schema, then read bodies
+			const [classesRows, studentRows, sessionsRows, marksRows, ledgerRows, settingsRows] = await Promise.all([
+				readValues(spreadsheetId, 'Classes!A1:Z'),
+				readValues(spreadsheetId, 'Students!A1:Z'),
+				readValues(spreadsheetId, 'Sessions!A1:Z'),
+				readValues(spreadsheetId, 'Marks!A1:Z'),
+				readValues(spreadsheetId, 'Ledger!A1:Z'),
+				readValues(spreadsheetId, 'Settings!A1:Z'),
+			])
+			const getBody = (rows: (string | null)[][]) => rows.slice(1)
+			const studentsBody = getBody(studentRows)
+			const sessionsBody = getBody(sessionsRows)
+			const marksBody = getBody(marksRows)
+			const ledgerBody = getBody(ledgerRows)
+			const settingsBody = getBody(settingsRows)
+
+			// Begin destructive overwrite for this class
+			await db.transaction('rw', db.students, db.sessions, db.ledger, db.settings, async () => {
+				// Clear current class data
+				const sessionKeys = await db.sessions.where('classId').equals(classId).primaryKeys()
+				if (sessionKeys.length) await db.sessions.bulkDelete(sessionKeys as string[])
+				const ledgerKeys = await db.ledger.where('classId').equals(classId).primaryKeys()
+				if (ledgerKeys.length) await db.ledger.bulkDelete(ledgerKeys as string[])
+				const studentKeys = await db.students.where('classId').equals(classId).primaryKeys()
+				if (studentKeys.length) await db.students.bulkDelete(studentKeys as string[])
+
+				// Students
+				if (studentsBody.length) {
+					await db.students.bulkAdd(
+						studentsBody.map((r) => ({
+							id: String(r[0] ?? ''),
+							classId: String(r[1] ?? ''),
+							firstName: (r[2] as string) || undefined,
+							lastName: (r[3] as string) || undefined,
+							displayName: String(r[4] ?? ''),
+							externalId: (r[5] as string) || undefined,
+							loginId: (r[6] as string) || undefined,
+							sisId: (r[7] as string) || undefined,
+							notes: (r[8] as string) || undefined,
+							absenceCount: Number(r[9] ?? 0),
+						})),
+					)
+				}
+
+				// Sessions and Marks
+				const marksBySession = new Map<string, { [sid: string]: Mark }>()
+				for (const r of marksBody) {
+					const sessionId = String(r[0] ?? '')
+					const studentId = String(r[1] ?? '')
+					const status = String(r[3] ?? 'present') as 'present' | 'absent'
+					const reason = (r[4] as any) || undefined
+					const markedAt = (r[5] as any) || undefined
+					const entry: Mark = { status, reason, markedAt }
+					const obj = marksBySession.get(sessionId) || {}
+					obj[studentId] = entry
+					marksBySession.set(sessionId, obj)
+				}
+
+				if (sessionsBody.length) {
+					await db.sessions.bulkAdd(
+						sessionsBody.map((r) => ({
+							id: String(r[0] ?? ''),
+							classId: String(r[1] ?? ''),
+							date: String(r[2] ?? ''),
+							createdAt: (r[3] as any) || undefined,
+							savedAt: (r[4] as any) || undefined,
+							picks: String(r[5] ?? '').split(',').filter(Boolean),
+							carryoverIds: String(r[7] ?? '').split(',').filter(Boolean),
+							marks: marksBySession.get(String(r[0] ?? '')) || {},
+						} as SessionEntity)),
+					)
+				}
+
+				// Ledger
+				if (ledgerBody.length) {
+					await db.ledger.bulkAdd(
+						ledgerBody.map((r) => ({
+							id: String(r[0] ?? ''),
+							classId: String(r[1] ?? ''),
+							studentId: String(r[2] ?? ''),
+							date: String(r[4] ?? ''),
+							sessionId: (r[5] as any) || undefined,
+							reason: (r[6] as any) || undefined,
+							notes: (r[7] as any) || undefined,
+						})),
+					)
+				}
+
+				// Settings (only apply for this class if present)
+				if (settingsBody.length) {
+					const row = settingsBody.find((r) => String(r[0] ?? '') === classId)
+					if (row) {
+						await db.settings.put({
+							classId,
+							defaultN: Number(row[1] ?? 5),
+							neverSeenWeight: Number(row[2] ?? 2),
+							cooldownWeight: Number(row[3] ?? 0.5),
+							spreadsheetId: spreadsheetId,
+						})
+					}
+				}
+			})
+			// eslint-disable-next-line no-alert
+			alert('Import completed and local data overwritten for this class.')
+		} catch (e) {
+			console.error('[Store]', 'Import failed', e)
+			// eslint-disable-next-line no-alert
+			alert(`Import failed: ${(e as Error).message}`)
+		} finally {
+			set({ isLoading: false })
+		}
 	},
 }))
 
