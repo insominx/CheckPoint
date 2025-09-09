@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store'
 import { db } from '../db'
+import { createAndInitSpreadsheetForCheckPoint, getAccessToken, normalizeAndValidateSpreadsheetId, ensureCheckpointSheets } from '../google'
 
 export default function Settings() {
 	const { selectedClassId } = useStore()
@@ -8,6 +9,9 @@ export default function Settings() {
 	const [neverSeenWeight, setNeverSeenWeight] = useState(2)
 	const [cooldownWeight, setCooldownWeight] = useState(0.5)
 	const [csvPicked, setCsvPicked] = useState(false)
+	const [spreadsheetId, setSpreadsheetId] = useState<string | undefined>(undefined)
+	const [isAuthReady, setIsAuthReady] = useState(false)
+	const [busy, setBusy] = useState(false)
 
 	useEffect(() => {
 		;(async () => {
@@ -19,6 +23,7 @@ export default function Settings() {
 				setNeverSeenWeight(st.neverSeenWeight)
 				setCooldownWeight(st.cooldownWeight)
 				setCsvPicked(!!st.csvFileHandle)
+				setSpreadsheetId((st as any).spreadsheetId)
 			}
 		})()
 	}, [selectedClassId])
@@ -47,7 +52,7 @@ export default function Settings() {
 							const cls = await db.classes.get(selectedClassId)
 							if (!cls) return
 							await db.classes.put({ ...cls, defaultN })
-							await db.settings.put({ classId: selectedClassId, defaultN, neverSeenWeight, cooldownWeight })
+							await db.settings.put({ classId: selectedClassId, defaultN, neverSeenWeight, cooldownWeight, spreadsheetId })
 						}}
 					>
 						Save
@@ -86,6 +91,105 @@ export default function Settings() {
 						Cooldown weight
 						<input type="number" step={0.1} value={cooldownWeight} onChange={(e) => setCooldownWeight(Number(e.target.value))} />
 					</label>
+				</div>
+				<hr style={{ margin: '16px 0' }} />
+				<div>
+					<h3 style={{ margin: '4px 0' }}>Google Sheets</h3>
+					<div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+						<button
+							disabled={busy}
+							onClick={async () => {
+								try {
+									setBusy(true)
+									await getAccessToken()
+									setIsAuthReady(true)
+									alert('Google connected — token acquired')
+								} catch (e) {
+									alert((e as Error).message)
+								} finally {
+									setBusy(false)
+								}
+							}}
+						>
+							{isAuthReady ? 'Google Connected' : 'Connect Google'}
+						</button>
+
+						<button
+							disabled={busy}
+							onClick={async () => {
+								if (!selectedClassId) return
+								try {
+									setBusy(true)
+									// Ensure we have Drive scope before creating a spreadsheet
+									await getAccessToken([
+										'https://www.googleapis.com/auth/spreadsheets',
+										'https://www.googleapis.com/auth/drive.file',
+									])
+									console.log('[Settings]', 'Creating spreadsheet for class', selectedClassId)
+									const cls = await db.classes.get(selectedClassId)
+									const title = `CheckPoint — ${cls?.name || selectedClassId}`
+									const id = await createAndInitSpreadsheetForCheckPoint(title)
+									setSpreadsheetId(id)
+									const st = (await db.settings.get(selectedClassId)) || {
+										classId: selectedClassId,
+										defaultN,
+										neverSeenWeight,
+										cooldownWeight,
+									}
+									await db.settings.put({ ...st, spreadsheetId: id })
+									console.log('[Settings]', 'Spreadsheet created and ID saved', id)
+									alert('Created spreadsheet and initialized headers.')
+								} catch (e) {
+									console.error('[Settings]', 'Create spreadsheet failed', e)
+									alert((e as Error).message)
+								} finally {
+									setBusy(false)
+								}
+							}}
+						>
+							Create Spreadsheet
+						</button>
+
+						<label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+							<span>Spreadsheet ID</span>
+							<input
+								style={{ width: 340 }}
+								type="text"
+								placeholder="Paste an existing spreadsheetId"
+								value={spreadsheetId || ''}
+								onChange={(e) => setSpreadsheetId(e.target.value || undefined)}
+							/>
+						</label>
+						<button
+							disabled={busy}
+							onClick={async () => {
+								if (!selectedClassId || !spreadsheetId) return
+								const st = (await db.settings.get(selectedClassId)) || {
+									classId: selectedClassId,
+									defaultN,
+									neverSeenWeight,
+									cooldownWeight,
+								}
+								try {
+									console.log('[Settings]', 'Saving provided Spreadsheet ID', spreadsheetId)
+									const id = normalizeAndValidateSpreadsheetId(spreadsheetId)
+									await ensureCheckpointSheets(id)
+									await db.settings.put({ ...st, spreadsheetId: id })
+									console.log('[Settings]', 'Spreadsheet ID saved', id)
+									alert('Saved Spreadsheet ID.')
+								} catch (e) {
+									console.error('[Settings]', 'Save ID failed', e)
+									alert((e as Error).message)
+									return
+								}
+							}}
+						>
+							Save ID
+						</button>
+					</div>
+					{spreadsheetId ? (
+						<p style={{ marginTop: 8 }}>Using Spreadsheet: <code>{spreadsheetId}</code></p>
+					) : null}
 				</div>
 				</>
 			)}

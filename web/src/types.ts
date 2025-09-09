@@ -61,6 +61,7 @@ export interface PerClassSettings {
 	neverSeenWeight: number
 	cooldownWeight: number
 	csvFileHandle?: unknown
+	spreadsheetId?: string
 }
 
 

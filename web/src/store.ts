@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 import { db } from './db'
+import { appendRows, normalizeAndValidateSpreadsheetId, ensureCheckpointSheets, spreadsheetExists } from './google'
 import type { AbsenceLedgerItem, ClassEntity, Mark, SessionEntity, StudentEntity } from './types'
 import { weightedSampleWithoutReplacement } from './sampling'
 
@@ -172,6 +173,27 @@ export const useStore = create<Store>((set, get) => ({
 		const session = get().currentSession
 		const classId = get().selectedClassId
 		if (!session || !classId) return
+		// Require a valid, existing Google Sheet before saving attendance
+		{
+			const s = await db.settings.get(classId)
+			const idRaw = (s as any)?.spreadsheetId as string | undefined
+			console.log('[Store]', 'Pre-save sheet check', { classId, idRaw })
+			if (!idRaw) {
+				console.warn('[Store]', 'No spreadsheetId configured for class; blocking save')
+				// eslint-disable-next-line no-alert
+				alert('Google Sheets is not configured for this class. Open Settings and create or save a Spreadsheet ID first.')
+				throw new Error('SHEETS_NOT_CONFIGURED')
+			}
+			const id = normalizeAndValidateSpreadsheetId(idRaw)
+			const exists = await spreadsheetExists(id)
+			console.log('[Store]', 'Spreadsheet existence result', { id, exists })
+			if (!exists) {
+				console.warn('[Store]', 'Spreadsheet missing or inaccessible; blocking save')
+				// eslint-disable-next-line no-alert
+				alert('The configured Spreadsheet ID does not exist or you no longer have access. Open Settings to create a new sheet or save a different ID.')
+				throw new Error('SHEETS_NOT_FOUND')
+			}
+		}
 		const nowISO = new Date().toISOString()
 		const sessionToSave: SessionEntity = { ...session, date: nowISO }
 		await db.transaction('rw', db.sessions, db.ledger, db.students, async () => {
@@ -200,6 +222,78 @@ export const useStore = create<Store>((set, get) => ({
 				await db.students.bulkPut(updates)
 			}
 		})
+
+		// Dual-write to Google Sheets if configured
+		try {
+			const settings = await db.settings.get(classId)
+			const spreadsheetIdRaw = (settings as any)?.spreadsheetId as string | undefined
+			const spreadsheetId = spreadsheetIdRaw ? normalizeAndValidateSpreadsheetId(spreadsheetIdRaw) : undefined
+			if (spreadsheetId) {
+				console.log('[Store]', 'Saving to Google Sheets', { spreadsheetId, sessionId: sessionToSave.id })
+				await ensureCheckpointSheets(spreadsheetId)
+				const classStudents = await db.students.where('classId').equals(classId).toArray()
+				const nameById = new Map<string, string>(classStudents.map((s) => [s.id, s.displayName]))
+				const picksCSV = sessionToSave.picks.join(',')
+				const picksNamesCSV = sessionToSave.picks.map((sid) => nameById.get(sid) ?? '').join(',')
+				const carryoverCSV = (sessionToSave.carryoverIds || []).join(',')
+				const carryoverNamesCSV = (sessionToSave.carryoverIds || []).map((sid) => nameById.get(sid) ?? '').join(',')
+				// Sessions row
+				await appendRows(spreadsheetId, 'Sessions', [[
+					sessionToSave.id,
+					sessionToSave.classId,
+					sessionToSave.date,
+					picksCSV,
+					picksNamesCSV,
+					carryoverCSV,
+					carryoverNamesCSV,
+				]])
+				// Marks rows (append only if any marks exist)
+				const markEntries = Object.entries(sessionToSave.marks)
+				if (markEntries.length) {
+					const markRows: (string | null)[][] = []
+					for (const [sid, mark] of markEntries) {
+						markRows.push([
+							sessionToSave.id,
+							sid,
+							nameById.get(sid) ?? '',
+							mark.status,
+							mark.reason ?? null,
+						])
+					}
+					await appendRows(spreadsheetId, 'Marks', markRows)
+				}
+				// Ledger rows (append only if any absent marks exist)
+				{
+					const absents = Object.entries(sessionToSave.marks).filter(([, m]) => m.status === 'absent')
+					if (absents.length) {
+						const ledgerRows: (string | null)[][] = []
+						for (const [sid, mark] of absents) {
+							ledgerRows.push([
+								/* id */ '',
+								classId,
+								sid,
+								nameById.get(sid) ?? '',
+								sessionToSave.date,
+								sessionToSave.id,
+								mark.reason ?? null,
+								null,
+							])
+						}
+						await appendRows(spreadsheetId, 'Ledger', ledgerRows)
+					}
+				}
+				// Basic success notice for manual testing
+				// Using alert here to make it obvious in the UI without extra components
+				// eslint-disable-next-line no-alert
+				alert('Saved to Google Sheets successfully.')
+			} else {
+				console.log('[Store]', 'No spreadsheetId configured; skipping Google Sheets write')
+			}
+		} catch (e) {
+			console.error('[Store]', 'Google Sheets write failed', e)
+			// eslint-disable-next-line no-alert
+			alert(`Google Sheets write failed: ${(e as Error).message}`)
+		}
 		// Attempt CSV append via File System Access API if configured
 		try {
 			const settings = await db.settings.get(classId)
