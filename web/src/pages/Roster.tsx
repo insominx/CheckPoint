@@ -4,32 +4,38 @@ import { db } from '../db'
 import { useStore } from '../store'
 import { parseRosterCsv, toStudentEntities } from '../utils/csv'
 
+interface StudentDisplay {
+	id: string
+	displayName: string
+	firstName?: string
+	lastName?: string
+	absenceCount: number
+}
+
 export default function Roster() {
-	const { selectedClassId, getStudents } = useStore()
-	const [students, setStudents] = useState<{ id: string; displayName: string; firstName?: string; lastName?: string; absenceCount: number }[]>([])
+	const { selectedClassId, getStudents, getAbsenceCount } = useStore()
+	const [students, setStudents] = useState<StudentDisplay[]>([])
 	const [sortKey, setSortKey] = useState<'first' | 'last' | 'absences'>('first')
 	const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
 
-	async function updateAbsenceCount(studentId: string, nextCount: number) {
-		const clamped = Math.max(0, Math.floor(nextCount))
-		await db.students.update(studentId, { absenceCount: clamped })
-		setStudents((prev) => prev.map((s) => (s.id === studentId ? { ...s, absenceCount: clamped } : s)))
-		// If count is zero, also clear ledger entries for this student in this class to remove carryover
-		if (clamped === 0 && selectedClassId) {
-			const items = await db.ledger.where('classId').equals(selectedClassId).and((l) => l.studentId === studentId).toArray()
-			if (items.length) {
-				await db.ledger.bulkDelete(items.map((i) => i.id))
-			}
-		}
+	async function loadStudentsWithCounts() {
+		if (!selectedClassId) return
+		const rawStudents = await getStudents()
+		// Get absence counts from ledger (single source of truth)
+		const withCounts = await Promise.all(
+			rawStudents.map(async (s) => ({
+				id: s.id,
+				displayName: s.displayName,
+				firstName: s.firstName,
+				lastName: s.lastName,
+				absenceCount: await getAbsenceCount(s.id),
+			})),
+		)
+		setStudents(withCounts)
 	}
 
 	useEffect(() => {
-		if (!selectedClassId) return
-		getStudents().then((s) =>
-			setStudents(
-				s.map((x) => ({ id: x.id, displayName: x.displayName, firstName: x.firstName, lastName: x.lastName, absenceCount: x.absenceCount })),
-			),
-		)
+		loadStudentsWithCounts()
 	}, [selectedClassId, getStudents])
 
 	// Sorted copy for rendering
@@ -56,7 +62,7 @@ export default function Roster() {
 				<p>Select a class first.</p>
 			) : (
 				<>
-					<div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+					<div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
 						<label>
 							Sort by{' '}
 							<select value={sortKey} onChange={(e) => setSortKey(e.target.value as any)}>
@@ -73,6 +79,9 @@ export default function Roster() {
 							</select>
 						</label>
 					</div>
+					<div style={{ fontSize: 12, opacity: 0.7, marginTop: 8 }}>
+						💡 To correct an absence, go to the <strong>History</strong> page and expand the session.
+					</div>
 					<div>
 						<input
 							type="file"
@@ -87,10 +96,7 @@ export default function Roster() {
 										await db.students.put(s)
 									}
 								})
-								const fresh = await getStudents()
-								setStudents(
-									fresh.map((x) => ({ id: x.id, displayName: x.displayName, firstName: x.firstName, lastName: x.lastName, absenceCount: x.absenceCount })),
-								)
+								await loadStudentsWithCounts()
 							}}
 						/>
 					</div>
@@ -100,19 +106,13 @@ export default function Roster() {
 								<div style={{ fontWeight: 600, marginBottom: 8 }}>{s.displayName}</div>
 								<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
 									<span>Absences:</span>
-									<button onClick={() => updateAbsenceCount(s.id, (s.absenceCount || 0) - 1)}>-</button>
-									<input
-										type="number"
-										min={0}
-										value={s.absenceCount || 0}
-										onChange={(e) => {
-											const val = Number(e.target.value)
-											setStudents((prev) => prev.map((it) => (it.id === s.id ? { ...it, absenceCount: isNaN(val) ? 0 : val } : it)))
-										}}
-										onBlur={(e) => updateAbsenceCount(s.id, Number(e.target.value))}
-										style={{ width: 80 }}
-									/>
-									<button onClick={() => updateAbsenceCount(s.id, (s.absenceCount || 0) + 1)}>+</button>
+									<span style={{
+										fontWeight: 600,
+										color: s.absenceCount > 0 ? '#ef4444' : '#22c55e',
+										fontSize: 18,
+									}}>
+										{s.absenceCount}
+									</span>
 								</div>
 							</div>
 						))}
@@ -122,5 +122,3 @@ export default function Roster() {
 		</div>
 	)
 }
-
-

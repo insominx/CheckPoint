@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:run": "vitest run"
   },
   "dependencies": {
     "dexie": "^4.2.0",
@@ -25,6 +27,7 @@
     "@types/react-dom": "^19.1.7",
     "@types/seedrandom": "^3.0.8",
     "@vitejs/plugin-react": "^5.0.0",
+    "@vitest/coverage-v8": "^4.0.17",
     "eslint": "^9.33.0",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
@@ -33,6 +36,7 @@
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.39.1",
     "vite": "^7.1.2",
-    "vite-plugin-pwa": "^1.0.3"
+    "vite-plugin-pwa": "^1.0.3",
+    "vitest": "^4.0.17"
   }
 }

@@ -1,14 +1,13 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../store'
-import { db } from '../db'
 import type { AbsenceReason } from '../types'
 
 export default function Session() {
 	const navigate = useNavigate()
-	const { selectedClassId, currentSession, pickStudents, redrawRandom, markStudent, saveSession, currentN, isLoading } = useStore()
-const [studentNamesById, setStudentNamesById] = useState<Record<string, string>>({})
-const [reasonById, setReasonById] = useState<Record<string, AbsenceReason>>({})
+	const { selectedClassId, currentSession, pickStudents, redrawRandom, markStudent, saveSession, currentN, isLoading, getStudents } = useStore()
+	const [studentNamesById, setStudentNamesById] = useState<Record<string, string>>({})
+	const [reasonById, setReasonById] = useState<Record<string, AbsenceReason>>({})
 
 	useEffect(() => {
 		if (!selectedClassId) navigate('/')
@@ -19,14 +18,14 @@ const [reasonById, setReasonById] = useState<Record<string, AbsenceReason>>({})
 	}, [currentSession, selectedClassId, pickStudents])
 
 	useEffect(() => {
-		;(async () => {
+		; (async () => {
 			if (!selectedClassId) return
-			const students = await db.students.where('classId').equals(selectedClassId).toArray()
+			const students = await getStudents()
 			const mapping: Record<string, string> = {}
 			for (const s of students) mapping[s.id] = s.displayName
 			setStudentNamesById(mapping)
 		})()
-	}, [selectedClassId])
+	}, [selectedClassId, getStudents])
 
 	if (!currentSession) {
 		return (

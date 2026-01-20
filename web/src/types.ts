@@ -17,7 +17,8 @@ export interface StudentEntity {
 	loginId?: string
 	sisId?: string
 	notes?: string
-	absenceCount: number
+	/** @deprecated Use getAbsenceCount() from store - this is derived from ledger */
+	absenceCount?: number
 }
 
 export type AttendanceStatus = 'present' | 'absent'
@@ -68,6 +69,7 @@ export interface PerClassSettings {
 	cooldownWeight: number
 	csvFileHandle?: unknown
 	spreadsheetId?: string
+	lastExportedAt?: string // ISO timestamp for optimistic locking on Sheets
 }
 
 

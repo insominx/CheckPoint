@@ -2,8 +2,10 @@ import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 import { db } from './db'
 import { appendRows, ensureCheckpointSheets, ensureSpreadsheet, clearSheetData, readValues, normalizeAndValidateSpreadsheetId } from './google'
-import type { AbsenceLedgerItem, ClassEntity, Mark, SessionEntity, StudentEntity } from './types'
+import type { AbsenceLedgerItem, ClassEntity, Mark, PerClassSettings, SessionEntity, StudentEntity } from './types'
 import { weightedSampleWithoutReplacement } from './sampling'
+import { canStartOperation, shouldWarnAboutConflict } from './sync'
+import { validateStudentRow, logValidationResults } from './validation'
 
 export interface SamplingStateByStudent {
 	studentId: string
@@ -18,6 +20,7 @@ interface UIState {
 	currentN: number
 	currentSession?: SessionEntity
 	isLoading: boolean
+	isPickingStudents: boolean // Guard flag for pickStudents race condition
 	error?: string
 }
 
@@ -25,7 +28,12 @@ interface Actions {
 	loadClasses: () => Promise<ClassEntity[]>
 	createClass: (name: string) => Promise<ClassEntity>
 	selectClass: (classId: string) => Promise<void>
+	/** Restore a draft session from local storage if one exists for the selected class. */
+	restoreDraftSession: () => void
 	getStudents: () => Promise<StudentEntity[]>
+	getSessions: () => Promise<SessionEntity[]>
+	getClassSettings: () => Promise<{ cls: ClassEntity; settings: PerClassSettings } | null>
+	updateClassSettings: (updates: { defaultN?: number; neverSeenWeight?: number; cooldownWeight?: number; spreadsheetId?: string }) => Promise<void>
 	pickStudents: () => Promise<void>
 	redrawRandom: () => Promise<void>
 	markStudent: (studentId: string, mark: Mark) => void
@@ -34,6 +42,12 @@ interface Actions {
 	clearHistoryForClass: () => Promise<void>
 	exportCurrentClassToSheets: (opts?: { recreate?: boolean }) => Promise<void>
 	importCurrentClassFromSheets: () => Promise<void>
+	/** Correct a mark on a past session. Updates session and ledger atomically. */
+	correctMark: (sessionId: string, studentId: string, newStatus: 'present' | 'absent', reason?: 'excused' | 'unexcused') => Promise<void>
+	/** Get absence count for a student from ledger (single source of truth). */
+	getAbsenceCount: (studentId: string) => Promise<number>
+	/** Get detailed session info including student names for the History UI. */
+	getSessionDetails: (sessionId: string) => Promise<{ session: SessionEntity; studentNames: Record<string, string> } | null>
 }
 
 type Store = UIState & Actions
@@ -44,6 +58,7 @@ const DEFAULT_COOLDOWN_WEIGHT = 0.5
 
 export const useStore = create<Store>((set, get) => ({
 	isLoading: false,
+	isPickingStudents: false,
 	currentN: DEFAULT_N,
 	async loadClasses() {
 		const classes = await db.classes.toArray()
@@ -58,16 +73,78 @@ export const useStore = create<Store>((set, get) => ({
 		set({ selectedClassId: classId })
 		const cls = await db.classes.get(classId)
 		set({ currentN: cls?.defaultN ?? DEFAULT_N })
+		get().restoreDraftSession()
+	},
+	restoreDraftSession() {
+		const classId = get().selectedClassId
+		if (!classId) return
+		const draftJson = localStorage.getItem(`checkpoint_draft_session_${classId}`)
+		if (draftJson) {
+			try {
+				const draft = JSON.parse(draftJson)
+				// Basic validation to ensure it's for this class
+				if (draft && draft.classId === classId) {
+					console.debug('[Store] Restored draft session')
+					set({ currentSession: draft })
+				}
+			} catch (e) {
+				console.warn('[Store] Failed to parse draft session', e)
+			}
+		}
 	},
 	async getStudents() {
 		const classId = get().selectedClassId
 		if (!classId) return []
 		return db.students.where('classId').equals(classId).toArray()
 	},
-	async pickStudents() {
+	async getSessions() {
+		const classId = get().selectedClassId
+		if (!classId) return []
+		const sessions = await db.sessions.where('classId').equals(classId).toArray()
+		return sessions.sort((a, b) => Date.parse(b.date) - Date.parse(a.date))
+	},
+	async getClassSettings() {
+		const classId = get().selectedClassId
+		if (!classId) return null
+		const cls = await db.classes.get(classId)
+		if (!cls) return null
+		const settings = await db.settings.get(classId)
+		const fullSettings: PerClassSettings = {
+			classId,
+			defaultN: settings?.defaultN ?? cls.defaultN ?? DEFAULT_N,
+			neverSeenWeight: settings?.neverSeenWeight ?? DEFAULT_NEVER_SEEN_WEIGHT,
+			cooldownWeight: settings?.cooldownWeight ?? DEFAULT_COOLDOWN_WEIGHT,
+			spreadsheetId: settings?.spreadsheetId,
+			lastExportedAt: settings?.lastExportedAt,
+		}
+		return { cls, settings: fullSettings }
+	},
+	async updateClassSettings(updates) {
 		const classId = get().selectedClassId
 		if (!classId) return
-		set({ isLoading: true, error: undefined })
+		const existing = await db.settings.get(classId)
+		await db.settings.put({
+			classId,
+			defaultN: updates.defaultN ?? existing?.defaultN ?? DEFAULT_N,
+			neverSeenWeight: updates.neverSeenWeight ?? existing?.neverSeenWeight ?? DEFAULT_NEVER_SEEN_WEIGHT,
+			cooldownWeight: updates.cooldownWeight ?? existing?.cooldownWeight ?? DEFAULT_COOLDOWN_WEIGHT,
+			spreadsheetId: updates.spreadsheetId ?? existing?.spreadsheetId,
+			lastExportedAt: existing?.lastExportedAt,
+		})
+		// Also update class.defaultN if changed
+		if (updates.defaultN !== undefined) {
+			const cls = await db.classes.get(classId)
+			if (cls) await db.classes.put({ ...cls, defaultN: updates.defaultN })
+			set({ currentN: updates.defaultN })
+		}
+	},
+	async pickStudents() {
+		// Guard against concurrent calls (race condition prevention)
+		if (!canStartOperation(get().isPickingStudents, !!get().currentSession)) return
+
+		const classId = get().selectedClassId
+		if (!classId) return
+		set({ isPickingStudents: true, isLoading: true, error: undefined })
 		try {
 			const [students, sessionsRaw, ledger, settings] = await Promise.all([
 				db.students.where('classId').equals(classId).toArray(),
@@ -156,7 +233,7 @@ export const useStore = create<Store>((set, get) => ({
 		} catch (e) {
 			set({ error: (e as Error).message })
 		} finally {
-			set({ isLoading: false })
+			set({ isLoading: false, isPickingStudents: false })
 		}
 	},
 	async redrawRandom() {
@@ -178,7 +255,7 @@ export const useStore = create<Store>((set, get) => ({
 		if (!session || !classId) return
 		const nowISO = new Date().toISOString()
 		const sessionToSave: SessionEntity = { ...session, date: nowISO, savedAt: nowISO, createdAt: session.createdAt ?? session.date ?? nowISO }
-		await db.transaction('rw', db.sessions, db.ledger, db.students, async () => {
+		await db.transaction('rw', db.sessions, db.ledger, async () => {
 			await db.sessions.add(sessionToSave)
 			const absentEntries: AbsenceLedgerItem[] = []
 			for (const [sid, mark] of Object.entries(sessionToSave.marks)) {
@@ -194,15 +271,7 @@ export const useStore = create<Store>((set, get) => ({
 				}
 			}
 			if (absentEntries.length) await db.ledger.bulkAdd(absentEntries)
-			// Increment absenceCount for absent students
-			if (absentEntries.length) {
-				const ids = absentEntries.map((a) => a.studentId)
-				const toUpdate = await db.students.bulkGet(ids)
-				const updates = toUpdate
-					.filter((s): s is StudentEntity => !!s)
-					.map((s) => ({ ...s, absenceCount: (s.absenceCount || 0) + 1 }))
-				await db.students.bulkPut(updates)
-			}
+			// absenceCount is now derived from ledger — no caching
 		})
 
 		// Attempt CSV append via File System Access API if configured
@@ -222,8 +291,11 @@ export const useStore = create<Store>((set, get) => ({
 				await writable.write(absentRows.join(''))
 				await writable.close()
 			}
-		} catch {
-			// ignore FS API failures (optional feature)
+		} catch (e) {
+			console.debug('[Store] CSV file handle write failed:', e)
+		}
+		if (classId) {
+			localStorage.removeItem(`checkpoint_draft_session_${classId}`)
 		}
 		set({ currentSession: undefined })
 	},
@@ -231,20 +303,14 @@ export const useStore = create<Store>((set, get) => ({
 	async deleteSession(sessionId) {
 		const classId = get().selectedClassId
 		if (!classId) return
-		await db.transaction('rw', db.sessions, db.ledger, db.students, async () => {
+		await db.transaction('rw', db.sessions, db.ledger, async () => {
 			const session = await db.sessions.get(sessionId)
 			if (!session || session.classId !== classId) return
 			await db.sessions.delete(sessionId)
+			// Delete ledger entries for this session — count is derived, no caching
 			const ledgerToDelete = await db.ledger.where({ classId, sessionId }).toArray()
 			if (ledgerToDelete.length) {
 				await db.ledger.bulkDelete(ledgerToDelete.map((l) => l.id))
-				// decrement absence counts for those students
-				const idToDecrement = ledgerToDelete.map((l) => l.studentId)
-				const students = await db.students.bulkGet(idToDecrement)
-				const updates = students
-					.filter((s): s is StudentEntity => !!s)
-					.map((s) => ({ ...s, absenceCount: Math.max(0, (s.absenceCount || 0) - 1) }))
-				await db.students.bulkPut(updates)
 			}
 		})
 	},
@@ -252,15 +318,70 @@ export const useStore = create<Store>((set, get) => ({
 	async clearHistoryForClass() {
 		const classId = get().selectedClassId
 		if (!classId) return
-		await db.transaction('rw', db.sessions, db.ledger, db.students, async () => {
+		await db.transaction('rw', db.sessions, db.ledger, async () => {
 			const sessions = await db.sessions.where('classId').equals(classId).primaryKeys()
 			if (sessions.length) await db.sessions.bulkDelete(sessions as string[])
 			const ledgerIds = await db.ledger.where('classId').equals(classId).primaryKeys()
 			if (ledgerIds.length) await db.ledger.bulkDelete(ledgerIds as string[])
-			// reset absence counts to 0 for this class
-			const classStudents = await db.students.where('classId').equals(classId).toArray()
-			await db.students.bulkPut(classStudents.map((s) => ({ ...s, absenceCount: 0 })))
+			// absenceCount is derived from ledger — clearing ledger clears counts
 		})
+	},
+
+	async correctMark(sessionId, studentId, newStatus, reason) {
+		const classId = get().selectedClassId
+		if (!classId) return
+		await db.transaction('rw', db.sessions, db.ledger, async () => {
+			const session = await db.sessions.get(sessionId)
+			if (!session || session.classId !== classId) return
+
+			const oldMark = session.marks[studentId]
+			const wasAbsent = oldMark?.status === 'absent'
+			const willBeAbsent = newStatus === 'absent'
+
+			// Update the session mark
+			const newMark: Mark = { status: newStatus, reason: willBeAbsent ? (reason ?? 'unexcused') : undefined, markedAt: new Date().toISOString() }
+			const updatedMarks = { ...session.marks, [studentId]: newMark }
+			await db.sessions.update(sessionId, { marks: updatedMarks })
+
+			// Update ledger accordingly
+			if (wasAbsent && !willBeAbsent) {
+				// Absent → Present: remove ledger entry for this session+student
+				const toDelete = await db.ledger.where({ classId, sessionId, studentId }).toArray()
+				if (toDelete.length) {
+					await db.ledger.bulkDelete(toDelete.map((l) => l.id))
+				}
+			} else if (!wasAbsent && willBeAbsent) {
+				// Present → Absent: add ledger entry
+				const { v4: uuidv4 } = await import('uuid')
+				await db.ledger.add({
+					id: uuidv4(),
+					classId,
+					studentId,
+					date: session.date,
+					sessionId,
+					reason: reason ?? 'unexcused',
+				})
+			} else if (wasAbsent && willBeAbsent && oldMark?.reason !== reason) {
+				// Absent → Absent but reason changed: update ledger entry
+				const existing = await db.ledger.where({ classId, sessionId, studentId }).first()
+				if (existing) {
+					await db.ledger.update(existing.id, { reason: reason ?? 'unexcused' })
+				}
+			}
+		})
+	},
+
+	async getAbsenceCount(studentId) {
+		return db.ledger.where('studentId').equals(studentId).count()
+	},
+
+	async getSessionDetails(sessionId) {
+		const session = await db.sessions.get(sessionId)
+		if (!session) return null
+		const students = await db.students.where('classId').equals(session.classId).toArray()
+		const studentNames: Record<string, string> = {}
+		for (const s of students) studentNames[s.id] = s.displayName
+		return { session, studentNames }
 	},
 
 	async exportCurrentClassToSheets(opts) {
@@ -275,15 +396,40 @@ export const useStore = create<Store>((set, get) => ({
 			console.log('[Store]', 'Export start', { classId, title, preferredId, opts })
 			const spreadsheetId = await ensureSpreadsheet(title, opts?.recreate ? undefined : preferredId)
 			await ensureCheckpointSheets(spreadsheetId)
-			// Clear data rows (keep headers) for deterministic export
-			await Promise.all([
-				clearSheetData(spreadsheetId, 'Classes'),
-				clearSheetData(spreadsheetId, 'Students'),
-				clearSheetData(spreadsheetId, 'Sessions'),
-				clearSheetData(spreadsheetId, 'Marks'),
-				clearSheetData(spreadsheetId, 'Ledger'),
-				clearSheetData(spreadsheetId, 'Settings'),
-			])
+
+			// Solution 2: Check for timestamp conflict before overwriting
+			try {
+				const settingsRows = await readValues(spreadsheetId, 'Settings!A2:E2')
+				const remoteTimestamp = settingsRows?.[0]?.[4] as string | undefined
+				const localTimestamp = settings?.lastExportedAt as string | undefined
+				if (shouldWarnAboutConflict(remoteTimestamp, localTimestamp)) {
+					const overwrite = confirm('⚠️ This Sheet was modified more recently than your last export.\n\nOverwrite with local data?')
+					if (!overwrite) {
+						set({ isLoading: false })
+						return
+					}
+				}
+			} catch (e) {
+				console.debug('[Store] Could not read remote timestamp (proceeding with export):', e)
+			}
+
+			// Solution 3: Clear data rows sequentially to handle partial failures
+			const sheetsToClear = ['Classes', 'Students', 'Sessions', 'Marks', 'Ledger', 'Settings']
+			const clearedSheets: string[] = []
+			try {
+				for (const sheet of sheetsToClear) {
+					await clearSheetData(spreadsheetId, sheet)
+					clearedSheets.push(sheet)
+				}
+			} catch (clearError) {
+				// Mark sheets that were cleared as failed
+				for (const sheet of clearedSheets) {
+					try {
+						await appendRows(spreadsheetId, sheet, [['EXPORT FAILED', new Date().toISOString()]])
+					} catch { /* ignore rollback errors */ }
+				}
+				throw clearError
+			}
 			// Gather data
 			const [classes, students, sessions, ledger, perClassSettings] = await Promise.all([
 				db.classes.toArray(),
@@ -296,8 +442,13 @@ export const useStore = create<Store>((set, get) => ({
 			// Write Classes (only this class)
 			const clsRow = classes.find((c) => c.id === classId)
 			if (clsRow) await appendRows(spreadsheetId, 'Classes', [[clsRow.id, clsRow.name, clsRow.defaultN]])
-			// Write Students
+			// Write Students (compute absenceCount from ledger)
 			if (students.length) {
+				// Build absence count map from ledger (single source of truth)
+				const absenceCountByStudent = new Map<string, number>()
+				for (const l of ledger) {
+					absenceCountByStudent.set(l.studentId, (absenceCountByStudent.get(l.studentId) || 0) + 1)
+				}
 				await appendRows(
 					spreadsheetId,
 					'Students',
@@ -311,7 +462,7 @@ export const useStore = create<Store>((set, get) => ({
 						s.loginId ?? '',
 						s.sisId ?? '',
 						s.notes ?? '',
-						s.absenceCount ?? 0,
+						absenceCountByStudent.get(s.id) ?? 0,
 					]),
 				)
 			}
@@ -346,19 +497,24 @@ export const useStore = create<Store>((set, get) => ({
 					]),
 				)
 			}
-			// Write Settings row for this class
-			if (perClassSettings) {
-				await appendRows(spreadsheetId, 'Settings', [[
-					perClassSettings.classId,
-					perClassSettings.defaultN,
-					perClassSettings.neverSeenWeight,
-					perClassSettings.cooldownWeight,
-				]])
-			}
-			// Persist spreadsheetId if changed
-			if (spreadsheetId && preferredId !== spreadsheetId) {
-				await db.settings.put({ ...(perClassSettings || { classId }), defaultN: perClassSettings?.defaultN ?? 5, neverSeenWeight: perClassSettings?.neverSeenWeight ?? 2, cooldownWeight: perClassSettings?.cooldownWeight ?? 0.5, spreadsheetId })
-			}
+			// Write Settings row for this class (include timestamp for conflict detection)
+			const exportTimestamp = new Date().toISOString()
+			await appendRows(spreadsheetId, 'Settings', [[
+				classId,
+				perClassSettings?.defaultN ?? 5,
+				perClassSettings?.neverSeenWeight ?? 2,
+				perClassSettings?.cooldownWeight ?? 0.5,
+				exportTimestamp, // Column E: lastExportedAt for conflict detection
+			]])
+			// Always save spreadsheetId and timestamp locally
+			await db.settings.put({
+				classId,
+				defaultN: perClassSettings?.defaultN ?? 5,
+				neverSeenWeight: perClassSettings?.neverSeenWeight ?? 2,
+				cooldownWeight: perClassSettings?.cooldownWeight ?? 0.5,
+				spreadsheetId,
+				lastExportedAt: exportTimestamp,
+			})
 			// eslint-disable-next-line no-alert
 			alert('Sync to Google Sheets completed.')
 		} catch (e) {
@@ -381,7 +537,7 @@ export const useStore = create<Store>((set, get) => ({
 			const spreadsheetId = normalizeAndValidateSpreadsheetId(idRaw)
 			await ensureCheckpointSheets(spreadsheetId)
 			// Read headers to verify schema, then read bodies
-			const [classesRows, studentRows, sessionsRows, marksRows, ledgerRows, settingsRows] = await Promise.all([
+			const [_classesRows, studentRows, sessionsRows, marksRows, ledgerRows, settingsRows] = await Promise.all([
 				readValues(spreadsheetId, 'Classes!A1:Z'),
 				readValues(spreadsheetId, 'Students!A1:Z'),
 				readValues(spreadsheetId, 'Sessions!A1:Z'),
@@ -408,20 +564,15 @@ export const useStore = create<Store>((set, get) => ({
 
 				// Students
 				if (studentsBody.length) {
-					await db.students.bulkAdd(
-						studentsBody.map((r) => ({
-							id: String(r[0] ?? ''),
-							classId: String(r[1] ?? ''),
-							firstName: (r[2] as string) || undefined,
-							lastName: (r[3] as string) || undefined,
-							displayName: String(r[4] ?? ''),
-							externalId: (r[5] as string) || undefined,
-							loginId: (r[6] as string) || undefined,
-							sisId: (r[7] as string) || undefined,
-							notes: (r[8] as string) || undefined,
-							absenceCount: Number(r[9] ?? 0),
-						})),
-					)
+					const validStudents = studentsBody
+						.map((r) => validateStudentRow(r, classId))
+						.filter((s): s is StudentEntity => s !== null)
+
+					logValidationResults('Students', studentsBody.length, validStudents)
+
+					if (validStudents.length) {
+						await db.students.bulkAdd(validStudents)
+					}
 				}
 
 				// Sessions and Marks
@@ -493,5 +644,15 @@ export const useStore = create<Store>((set, get) => ({
 		}
 	},
 }))
+
+// Autosave subscription
+useStore.subscribe((state) => {
+	if (state.currentSession && state.selectedClassId) {
+		const key = `checkpoint_draft_session_${state.selectedClassId}`
+		// Debounce could be added here if performance becomes an issue,
+		// but standard localStorage writes are fast enough for this data size.
+		localStorage.setItem(key, JSON.stringify(state.currentSession))
+	}
+})
 
 

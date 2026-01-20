@@ -5,6 +5,7 @@ import History from './pages/History'
 import Settings from './pages/Settings'
 import Roster from './pages/Roster'
 import { useStore } from './store'
+import ErrorBoundary from './ErrorBoundary'
 
 export default function App() {
 	const { selectedClassId } = useStore()
@@ -21,13 +22,15 @@ export default function App() {
 				</div>
 			</nav>
 			<main className="container">
-				<Routes>
-					<Route path="/" element={<Home />} />
-					<Route path="/session" element={<Session />} />
-					<Route path="/history" element={<History />} />
-					<Route path="/settings" element={<Settings />} />
-					<Route path="/roster" element={<Roster />} />
-				</Routes>
+				<ErrorBoundary>
+					<Routes>
+						<Route path="/" element={<Home />} />
+						<Route path="/session" element={<Session />} />
+						<Route path="/history" element={<History />} />
+						<Route path="/settings" element={<Settings />} />
+						<Route path="/roster" element={<Roster />} />
+					</Routes>
+				</ErrorBoundary>
 			</main>
 		</div>
 	)
