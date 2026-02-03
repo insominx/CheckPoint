@@ -1,7 +1,17 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 import { db } from './db'
-import { appendRows, ensureCheckpointSheets, ensureSpreadsheet, clearSheetData, readValues, normalizeAndValidateSpreadsheetId } from './google'
+import {
+	appendRows,
+	ensureCheckpointSheets,
+	ensureCheckpointSettingsHeader,
+	ensureSpreadsheet,
+	clearSheetData,
+	readValues,
+	normalizeAndValidateSpreadsheetId,
+	probeCheckpointSpreadsheetIdentity,
+	CHECKPOINT_SETTINGS_SCHEMA_VERSION,
+} from './google'
 import type { AbsenceLedgerItem, ClassEntity, Mark, PerClassSettings, SessionEntity, StudentEntity } from './types'
 import { weightedSampleWithoutReplacement } from './sampling'
 import { canStartOperation, shouldWarnAboutConflict } from './sync'
@@ -42,6 +52,7 @@ interface Actions {
 	clearHistoryForClass: () => Promise<void>
 	exportCurrentClassToSheets: (opts?: { recreate?: boolean }) => Promise<void>
 	importCurrentClassFromSheets: () => Promise<void>
+	repairCurrentClassSpreadsheetIdentity: (opts?: { silent?: boolean }) => Promise<void>
 	/** Correct a mark on a past session. Updates session and ledger atomically. */
 	correctMark: (sessionId: string, studentId: string, newStatus: 'present' | 'absent', reason?: 'excused' | 'unexcused') => Promise<void>
 	/** Get absence count for a student from ledger (single source of truth). */
@@ -123,6 +134,13 @@ export const useStore = create<Store>((set, get) => ({
 		const classId = get().selectedClassId
 		if (!classId) return
 		const existing = await db.settings.get(classId)
+		if (updates.spreadsheetId && updates.spreadsheetId !== existing?.spreadsheetId) {
+			const allSettings = await db.settings.toArray()
+			const conflict = allSettings.find((s) => s.spreadsheetId === updates.spreadsheetId && s.classId !== classId)
+			if (conflict) {
+				throw new Error(`Spreadsheet ID already linked to another class (${conflict.classId}).`)
+			}
+		}
 		await db.settings.put({
 			classId,
 			defaultN: updates.defaultN ?? existing?.defaultN ?? DEFAULT_N,
@@ -397,10 +415,26 @@ export const useStore = create<Store>((set, get) => ({
 			const spreadsheetId = await ensureSpreadsheet(title, opts?.recreate ? undefined : preferredId)
 			await ensureCheckpointSheets(spreadsheetId)
 
-			// Solution 2: Check for timestamp conflict before overwriting
+			const identity = await probeCheckpointSpreadsheetIdentity(spreadsheetId)
+			const classLabel = cls?.name ? `${cls.name} (${classId})` : classId
+			if (identity.multipleClassIds?.length) {
+				throw new Error(`Spreadsheet contains multiple class IDs: ${identity.multipleClassIds.join(', ')}`)
+			}
+			if (identity.classId && identity.classId !== classId) {
+				const sheetLabel = identity.className ? `${identity.className} (${identity.classId})` : identity.classId
+				throw new Error(`Spreadsheet belongs to ${sheetLabel}, not ${classLabel}.`)
+			}
+			if (identity.isLegacy) {
+				const proceed = confirm('This spreadsheet does not declare class identity yet.\n\nExport will repair the metadata. Continue?')
+				if (!proceed) {
+					set({ isLoading: false })
+					return
+				}
+			}
+
+			// Check for timestamp conflict before overwriting
 			try {
-				const settingsRows = await readValues(spreadsheetId, 'Settings!A2:E2')
-				const remoteTimestamp = settingsRows?.[0]?.[4] as string | undefined
+				const remoteTimestamp = identity.lastExportedAt
 				const localTimestamp = settings?.lastExportedAt as string | undefined
 				if (shouldWarnAboutConflict(remoteTimestamp, localTimestamp)) {
 					const overwrite = confirm('⚠️ This Sheet was modified more recently than your last export.\n\nOverwrite with local data?')
@@ -497,14 +531,17 @@ export const useStore = create<Store>((set, get) => ({
 					]),
 				)
 			}
+			await ensureCheckpointSettingsHeader(spreadsheetId)
 			// Write Settings row for this class (include timestamp for conflict detection)
 			const exportTimestamp = new Date().toISOString()
 			await appendRows(spreadsheetId, 'Settings', [[
 				classId,
+				cls?.name ?? '',
 				perClassSettings?.defaultN ?? 5,
 				perClassSettings?.neverSeenWeight ?? 2,
 				perClassSettings?.cooldownWeight ?? 0.5,
-				exportTimestamp, // Column E: lastExportedAt for conflict detection
+				CHECKPOINT_SETTINGS_SCHEMA_VERSION,
+				exportTimestamp,
 			]])
 			// Always save spreadsheetId and timestamp locally
 			await db.settings.put({
@@ -536,6 +573,17 @@ export const useStore = create<Store>((set, get) => ({
 			if (!idRaw) throw new Error('No Spreadsheet ID configured for this class')
 			const spreadsheetId = normalizeAndValidateSpreadsheetId(idRaw)
 			await ensureCheckpointSheets(spreadsheetId)
+			const identity = await probeCheckpointSpreadsheetIdentity(spreadsheetId)
+			if (identity.multipleClassIds?.length) {
+				throw new Error(`Spreadsheet contains multiple class IDs: ${identity.multipleClassIds.join(', ')}`)
+			}
+			if (identity.isLegacy) {
+				throw new Error('Spreadsheet is missing class identity metadata. Run Sync/Export to repair before importing.')
+			}
+			if (!identity.classId || identity.classId !== classId) {
+				const sheetLabel = identity.className ? `${identity.className} (${identity.classId})` : (identity.classId || 'Unknown')
+				throw new Error(`Spreadsheet belongs to ${sheetLabel}, not the selected class.`)
+			}
 			// Read headers to verify schema, then read bodies
 			const [_classesRows, studentRows, sessionsRows, marksRows, ledgerRows, settingsRows] = await Promise.all([
 				readValues(spreadsheetId, 'Classes!A1:Z'),
@@ -551,6 +599,17 @@ export const useStore = create<Store>((set, get) => ({
 			const marksBody = getBody(marksRows)
 			const ledgerBody = getBody(ledgerRows)
 			const settingsBody = getBody(settingsRows)
+			const settingsHeader = (settingsRows?.[0] || []).map((h) => String(h ?? '').trim())
+			const settingsIndex = new Map<string, number>()
+			settingsHeader.forEach((key, idx) => {
+				if (key) settingsIndex.set(key, idx)
+			})
+			const getSettingValue = (row: (string | null)[], key: string, fallbackIdx?: number) => {
+				const idx = settingsIndex.get(key)
+				const finalIdx = idx !== undefined ? idx : fallbackIdx
+				if (finalIdx === undefined) return undefined
+				return row?.[finalIdx]
+			}
 
 			// Begin destructive overwrite for this class
 			await db.transaction('rw', db.students, db.sessions, db.ledger, db.settings, async () => {
@@ -621,14 +680,16 @@ export const useStore = create<Store>((set, get) => ({
 
 				// Settings (only apply for this class if present)
 				if (settingsBody.length) {
-					const row = settingsBody.find((r) => String(r[0] ?? '') === classId)
+					const classIdIdx = settingsIndex.get('classId') ?? 0
+					const row = settingsBody.find((r) => String(r[classIdIdx] ?? '') === classId)
 					if (row) {
 						await db.settings.put({
 							classId,
-							defaultN: Number(row[1] ?? 5),
-							neverSeenWeight: Number(row[2] ?? 2),
-							cooldownWeight: Number(row[3] ?? 0.5),
+							defaultN: Number(getSettingValue(row, 'defaultN', 2) ?? 5),
+							neverSeenWeight: Number(getSettingValue(row, 'neverSeenWeight', 3) ?? 2),
+							cooldownWeight: Number(getSettingValue(row, 'cooldownWeight', 4) ?? 0.5),
 							spreadsheetId: spreadsheetId,
+							lastExportedAt: (getSettingValue(row, 'lastExportedAt') as string | undefined) || undefined,
 						})
 					}
 				}
@@ -639,6 +700,46 @@ export const useStore = create<Store>((set, get) => ({
 			console.error('[Store]', 'Import failed', e)
 			// eslint-disable-next-line no-alert
 			alert(`Import failed: ${(e as Error).message}`)
+		} finally {
+			set({ isLoading: false })
+		}
+	},
+	async repairCurrentClassSpreadsheetIdentity(opts) {
+		const classId = get().selectedClassId
+		if (!classId) return
+		set({ isLoading: true, error: undefined })
+		try {
+			const cls = await db.classes.get(classId)
+			const settings = await db.settings.get(classId)
+			const idRaw = settings?.spreadsheetId
+			if (!idRaw) throw new Error('No Spreadsheet ID configured for this class')
+			const spreadsheetId = normalizeAndValidateSpreadsheetId(idRaw)
+			await ensureCheckpointSheets(spreadsheetId)
+			const identity = await probeCheckpointSpreadsheetIdentity(spreadsheetId)
+			if (identity.multipleClassIds?.length) {
+				throw new Error(`Spreadsheet contains multiple class IDs: ${identity.multipleClassIds.join(', ')}`)
+			}
+			if (identity.classId && identity.classId !== classId) {
+				const sheetLabel = identity.className ? `${identity.className} (${identity.classId})` : identity.classId
+				throw new Error(`Spreadsheet belongs to ${sheetLabel}, not the selected class.`)
+			}
+			await ensureCheckpointSettingsHeader(spreadsheetId)
+			await clearSheetData(spreadsheetId, 'Settings')
+			await appendRows(spreadsheetId, 'Settings', [[
+				classId,
+				cls?.name ?? '',
+				settings?.defaultN ?? cls?.defaultN ?? DEFAULT_N,
+				settings?.neverSeenWeight ?? DEFAULT_NEVER_SEEN_WEIGHT,
+				settings?.cooldownWeight ?? DEFAULT_COOLDOWN_WEIGHT,
+				CHECKPOINT_SETTINGS_SCHEMA_VERSION,
+				'',
+			]])
+			if (!opts?.silent) {
+				alert('Spreadsheet identity metadata repaired.')
+			}
+		} catch (e) {
+			console.error('[Store]', 'Repair identity failed', e)
+			alert(`Repair failed: ${(e as Error).message}`)
 		} finally {
 			set({ isLoading: false })
 		}

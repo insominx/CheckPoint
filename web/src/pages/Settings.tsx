@@ -1,15 +1,16 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store'
 import { db } from '../db' // Needed for CSV file handle operations
-import { createAndInitSpreadsheetForCheckPoint, getAccessToken, normalizeAndValidateSpreadsheetId, ensureCheckpointSheets } from '../google'
+import { createAndInitSpreadsheetForCheckPoint, getAccessToken, normalizeAndValidateSpreadsheetId, ensureCheckpointSheets, probeCheckpointSpreadsheetIdentity } from '../google'
 
 export default function Settings() {
-	const { selectedClassId, getClassSettings, updateClassSettings, exportCurrentClassToSheets, importCurrentClassFromSheets } = useStore()
+	const { selectedClassId, getClassSettings, updateClassSettings, exportCurrentClassToSheets, importCurrentClassFromSheets, repairCurrentClassSpreadsheetIdentity } = useStore()
 	const [defaultN, setDefaultN] = useState(5)
 	const [neverSeenWeight, setNeverSeenWeight] = useState(2)
 	const [cooldownWeight, setCooldownWeight] = useState(0.5)
 	const [csvPicked, setCsvPicked] = useState(false)
 	const [spreadsheetId, setSpreadsheetId] = useState<string | undefined>(undefined)
+	const [activeClassName, setActiveClassName] = useState<string | undefined>(undefined)
 	const [isAuthReady, setIsAuthReady] = useState(false)
 	const [busy, setBusy] = useState(false)
 
@@ -18,6 +19,7 @@ export default function Settings() {
 			if (!selectedClassId) return
 			const result = await getClassSettings()
 			if (result) {
+				setActiveClassName(result.cls.name)
 				setDefaultN(result.cls.defaultN)
 				setNeverSeenWeight(result.settings.neverSeenWeight)
 				setCooldownWeight(result.settings.cooldownWeight)
@@ -34,6 +36,9 @@ export default function Settings() {
 				<p>Select a class first.</p>
 			) : (
 				<>
+					<p style={{ marginTop: 4, opacity: 0.85 }}>
+						Active class: <strong>{activeClassName || 'Unknown'}</strong> (<code>{selectedClassId}</code>)
+					</p>
 					<div>
 						<label>
 							Default N:{' '}
@@ -48,7 +53,11 @@ export default function Settings() {
 							style={{ marginLeft: 8 }}
 							onClick={async () => {
 								if (!selectedClassId) return
-								await updateClassSettings({ defaultN, neverSeenWeight, cooldownWeight, spreadsheetId })
+								try {
+									await updateClassSettings({ defaultN, neverSeenWeight, cooldownWeight, spreadsheetId })
+								} catch (e) {
+									alert((e as Error).message)
+								}
 							}}
 						>
 							Save
@@ -126,13 +135,8 @@ export default function Settings() {
 										const title = `CheckPoint — ${cls?.name || selectedClassId}`
 										const id = await createAndInitSpreadsheetForCheckPoint(title)
 										setSpreadsheetId(id)
-										const st = (await db.settings.get(selectedClassId)) || {
-											classId: selectedClassId,
-											defaultN,
-											neverSeenWeight,
-											cooldownWeight,
-										}
-										await db.settings.put({ ...st, spreadsheetId: id })
+										await updateClassSettings({ defaultN, neverSeenWeight, cooldownWeight, spreadsheetId: id })
+										await repairCurrentClassSpreadsheetIdentity({ silent: true })
 										console.log('[Settings]', 'Spreadsheet created and ID saved', id)
 										alert('Created spreadsheet and initialized headers.')
 									} catch (e) {
@@ -160,17 +164,11 @@ export default function Settings() {
 								disabled={busy}
 								onClick={async () => {
 									if (!selectedClassId || !spreadsheetId) return
-									const st = (await db.settings.get(selectedClassId)) || {
-										classId: selectedClassId,
-										defaultN,
-										neverSeenWeight,
-										cooldownWeight,
-									}
 									try {
 										console.log('[Settings]', 'Saving provided Spreadsheet ID', spreadsheetId)
 										const id = normalizeAndValidateSpreadsheetId(spreadsheetId)
 										await ensureCheckpointSheets(id)
-										await db.settings.put({ ...st, spreadsheetId: id })
+										await updateClassSettings({ defaultN, neverSeenWeight, cooldownWeight, spreadsheetId: id })
 										console.log('[Settings]', 'Spreadsheet ID saved', id)
 										alert('Saved Spreadsheet ID.')
 									} catch (e) {
@@ -181,6 +179,56 @@ export default function Settings() {
 								}}
 							>
 								Save ID
+							</button>
+							<button
+								disabled={busy || !selectedClassId || !spreadsheetId}
+								onClick={async () => {
+									if (!selectedClassId || !spreadsheetId) return
+									try {
+										setBusy(true)
+										await getAccessToken()
+										const id = normalizeAndValidateSpreadsheetId(spreadsheetId)
+										const identity = await probeCheckpointSpreadsheetIdentity(id)
+										if (identity.multipleClassIds?.length) {
+											throw new Error(`Spreadsheet contains multiple class IDs: ${identity.multipleClassIds.join(', ')}`)
+										}
+										if (identity.classId && identity.classId !== selectedClassId) {
+											const sheetLabel = identity.className ? `${identity.className} (${identity.classId})` : identity.classId
+											throw new Error(`Spreadsheet belongs to ${sheetLabel}, not this class.`)
+										}
+										if (identity.isLegacy) {
+											const proceed = confirm('This spreadsheet does not declare class identity yet.\n\nOpen anyway?')
+											if (!proceed) return
+										}
+										const url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(id)}/edit`
+										window.open(url, '_blank', 'noopener,noreferrer')
+									} catch (e) {
+										alert((e as Error).message)
+									} finally {
+										setBusy(false)
+									}
+								}}
+							>
+								Open Spreadsheet
+							</button>
+							<button
+								disabled={busy || !selectedClassId || !spreadsheetId}
+								onClick={async () => {
+									try {
+										setBusy(true)
+										await getAccessToken([
+											'https://www.googleapis.com/auth/spreadsheets',
+											'https://www.googleapis.com/auth/drive.file',
+										])
+										await repairCurrentClassSpreadsheetIdentity()
+									} catch (e) {
+										alert((e as Error).message)
+									} finally {
+										setBusy(false)
+									}
+								}}
+							>
+								Repair Sheet Metadata
 							</button>
 						</div>
 						{spreadsheetId ? (

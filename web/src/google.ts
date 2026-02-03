@@ -6,6 +6,26 @@ let accessToken: string | null = null
 let accessTokenExpiresAt: number | null = null
 let grantedScopes = new Set<string>()
 
+export const CHECKPOINT_SETTINGS_SCHEMA_VERSION = '2'
+export const CHECKPOINT_SETTINGS_HEADERS = [
+	'classId',
+	'className',
+	'defaultN',
+	'neverSeenWeight',
+	'cooldownWeight',
+	'schemaVersion',
+	'lastExportedAt',
+]
+
+export interface SpreadsheetIdentityProbe {
+	isLegacy: boolean
+	classId?: string
+	className?: string
+	schemaVersion?: string
+	lastExportedAt?: string
+	multipleClassIds?: string[]
+}
+
 async function loadGis(): Promise<void> {
 	if (gisLoaded) return gisLoaded
 	console.log(LOG_PREFIX, 'Loading GIS script...')
@@ -151,7 +171,7 @@ export async function createAndInitSpreadsheetForCheckPoint(title: string): Prom
 		Sessions: ['id','classId','date','createdAt','savedAt','picksCSV','picksNamesCSV','carryoverCSV','carryoverNamesCSV'],
 		Marks: ['sessionId','studentId','displayName','status','reason','markedAt'],
 		Ledger: ['id','classId','studentId','displayName','date','sessionId','reason','notes'],
-		Settings: ['classId','defaultN','neverSeenWeight','cooldownWeight'],
+		Settings: CHECKPOINT_SETTINGS_HEADERS,
 	}
 
 	await Promise.all(
@@ -304,7 +324,7 @@ export async function ensureCheckpointSheets(spreadsheetId: string): Promise<voi
 		Sessions: ['id','classId','date','createdAt','savedAt','picksCSV','picksNamesCSV','carryoverCSV','carryoverNamesCSV'],
 		Marks: ['sessionId','studentId','displayName','status','reason','markedAt'],
 		Ledger: ['id','classId','studentId','displayName','date','sessionId','reason','notes'],
-		Settings: ['classId','defaultN','neverSeenWeight','cooldownWeight'],
+		Settings: CHECKPOINT_SETTINGS_HEADERS,
 	}
 	const existing = await getSheetTitles(spreadsheetId)
 	const missing = Object.keys(required).filter((t) => !existing.has(t))
@@ -324,6 +344,123 @@ export async function ensureCheckpointSheets(spreadsheetId: string): Promise<voi
 			.filter(([t]) => !existing.has(t))
 			.map(([t, headers]) => writeHeaderRow(spreadsheetId, t, headers)),
 	)
+}
+
+function normalizeHeaderCell(value: string | null | undefined): string {
+	return String(value ?? '').trim()
+}
+
+function buildHeaderIndex(headers: string[]): Map<string, number> {
+	const map = new Map<string, number>()
+	headers.forEach((h, idx) => {
+		const key = normalizeHeaderCell(h)
+		if (key) map.set(key, idx)
+	})
+	return map
+}
+
+async function readClassIdentityFromClasses(spreadsheetId: string): Promise<{ classIds: string[]; classNameById: Map<string, string> }> {
+	const rows = await readValues(spreadsheetId, 'Classes!A2:B')
+	const classNameById = new Map<string, string>()
+	const ids: string[] = []
+	for (const r of rows) {
+		const id = normalizeHeaderCell(r?.[0] as any)
+		if (!id) continue
+		if (!classNameById.has(id)) {
+			classNameById.set(id, normalizeHeaderCell(r?.[1] as any))
+			ids.push(id)
+		}
+	}
+	return { classIds: ids, classNameById }
+}
+
+export async function ensureCheckpointSettingsHeader(spreadsheetId: string): Promise<void> {
+	const headerRows = await readValues(spreadsheetId, 'Settings!A1:Z1')
+	const headerRow = (headerRows?.[0] || []).map((h) => normalizeHeaderCell(h as any))
+	const matches = CHECKPOINT_SETTINGS_HEADERS.every((h, idx) => headerRow[idx] === h)
+	if (!matches) {
+		await writeHeaderRow(spreadsheetId, 'Settings', CHECKPOINT_SETTINGS_HEADERS)
+	}
+}
+
+export async function probeCheckpointSpreadsheetIdentity(spreadsheetId: string): Promise<SpreadsheetIdentityProbe> {
+	const settingsRows = await readValues(spreadsheetId, 'Settings!A1:Z')
+	if (!settingsRows.length) {
+		return { isLegacy: true }
+	}
+	const header = (settingsRows[0] || []).map((h) => normalizeHeaderCell(h as any))
+	const body = settingsRows.slice(1).filter((r) => r.some((c) => normalizeHeaderCell(c as any) !== ''))
+	const headerIndex = buildHeaderIndex(header)
+	const classIdIdx = headerIndex.get('classId')
+	const classNameIdx = headerIndex.get('className')
+	const schemaIdx = headerIndex.get('schemaVersion')
+	const lastExportedIdx = headerIndex.get('lastExportedAt')
+
+	const hasIdentityHeaders = classNameIdx !== undefined && schemaIdx !== undefined && lastExportedIdx !== undefined
+
+	if (classIdIdx === undefined) {
+		const fallback = await readClassIdentityFromClasses(spreadsheetId)
+		if (fallback.classIds.length === 1) {
+			const onlyId = fallback.classIds[0]
+			return {
+				isLegacy: true,
+				classId: onlyId,
+				className: fallback.classNameById.get(onlyId),
+			}
+		}
+		if (fallback.classIds.length > 1) {
+			return { isLegacy: true, multipleClassIds: fallback.classIds }
+		}
+		return { isLegacy: true }
+	}
+
+	const classIds = Array.from(
+		new Set(
+			body
+				.map((r) => normalizeHeaderCell(r?.[classIdIdx] as any))
+				.filter((id) => {
+					if (!id) return false
+					const lower = id.toLowerCase()
+					return !/^class\s*id$/.test(lower)
+				}),
+		),
+	)
+
+	if (classIds.length > 1) {
+		return { isLegacy: !hasIdentityHeaders, multipleClassIds: classIds }
+	}
+
+	if (classIds.length === 1) {
+		const classId = classIds[0]
+		const row = body.find((r) => normalizeHeaderCell(r?.[classIdIdx] as any) === classId) || []
+		const className = classNameIdx !== undefined ? normalizeHeaderCell(row?.[classNameIdx] as any) : undefined
+		const schemaVersion = schemaIdx !== undefined ? normalizeHeaderCell(row?.[schemaIdx] as any) : undefined
+		const lastExportedAt = lastExportedIdx !== undefined
+			? normalizeHeaderCell(row?.[lastExportedIdx] as any)
+			: normalizeHeaderCell(row?.[4] as any)
+		return {
+			isLegacy: !hasIdentityHeaders,
+			classId,
+			className,
+			schemaVersion,
+			lastExportedAt: lastExportedAt || undefined,
+		}
+	}
+
+	// No class IDs in Settings body; fall back to Classes tab
+	const fallback = await readClassIdentityFromClasses(spreadsheetId)
+	if (fallback.classIds.length === 1) {
+		const onlyId = fallback.classIds[0]
+		return {
+			isLegacy: true,
+			classId: onlyId,
+			className: fallback.classNameById.get(onlyId),
+		}
+	}
+	if (fallback.classIds.length > 1) {
+		return { isLegacy: true, multipleClassIds: fallback.classIds }
+	}
+	return { isLegacy: true }
 }
 
 
