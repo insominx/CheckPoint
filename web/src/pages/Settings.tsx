@@ -185,31 +185,15 @@ export default function Settings() {
 								Save ID
 							</button>
 							<button
-								disabled={busy || syncBusy || !selectedClassId || !spreadsheetId}
-								onClick={async () => {
-									if (!selectedClassId || !spreadsheetId) return
+								disabled={!selectedClassId || !spreadsheetId}
+								onClick={() => {
+									if (!spreadsheetId) return
 									try {
-										setBusy(true)
-										await getAccessToken()
 										const id = normalizeAndValidateSpreadsheetId(spreadsheetId)
-										const identity = await probeCheckpointSpreadsheetIdentity(id)
-										if (identity.multipleClassIds?.length) {
-											throw new Error(`Spreadsheet contains multiple class IDs: ${identity.multipleClassIds.join(', ')}`)
-										}
-										if (identity.classId && identity.classId !== selectedClassId) {
-											const sheetLabel = identity.className ? `${identity.className} (${identity.classId})` : identity.classId
-											throw new Error(`Spreadsheet belongs to ${sheetLabel}, not this class.`)
-										}
-										if (identity.isLegacy) {
-											const proceed = confirm('This spreadsheet does not declare class identity yet.\n\nOpen anyway?')
-											if (!proceed) return
-										}
 										const url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(id)}/edit`
 										window.open(url, '_blank', 'noopener,noreferrer')
 									} catch (e) {
 										alert((e as Error).message)
-									} finally {
-										setBusy(false)
 									}
 								}}
 							>

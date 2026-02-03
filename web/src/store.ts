@@ -819,12 +819,38 @@ export const useStore = create<Store>((set, get) => ({
 			if (identity.multipleClassIds?.length) {
 				throw new Error(`Spreadsheet contains multiple class IDs: ${identity.multipleClassIds.join(', ')}`)
 			}
+			// Check if we need to adopt data from a different class or legacy spreadsheet
+			let sourceClassId = classId
+			let adoptMode = false
 			if (identity.isLegacy) {
-				throw new Error('Spreadsheet is missing class identity metadata. Run Sync/Export to repair before importing.')
-			}
-			if (!identity.classId || identity.classId !== classId) {
-				const sheetLabel = identity.className ? `${identity.className} (${identity.classId})` : (identity.classId || 'Unknown')
-				throw new Error(`Spreadsheet belongs to ${sheetLabel}, not the selected class.`)
+				// Legacy spreadsheet - try to infer classId from Classes sheet or allow blind import
+				const classesRows = await readValues(spreadsheetId, 'Classes!A2:B')
+				const inferredClassId = classesRows?.[0]?.[0] ? String(classesRows[0][0]).trim() : null
+				const inferredClassName = classesRows?.[0]?.[1] ? String(classesRows[0][1]).trim() : null
+				const sheetLabel = inferredClassName ? `${inferredClassName} (${inferredClassId || 'unknown'})` : (inferredClassId || 'unknown class')
+				const proceed = confirm(
+					`This spreadsheet has legacy format (missing identity metadata).\n\n` +
+					`Found data for: ${sheetLabel}\n\n` +
+					`Do you want to import this data into the current class?\n\n` +
+					`The data will be adopted and the spreadsheet will be updated with proper metadata.`
+				)
+				if (!proceed) {
+					throw new Error('Import cancelled.')
+				}
+				if (inferredClassId) sourceClassId = inferredClassId
+				adoptMode = true
+			} else if (identity.classId && identity.classId !== classId) {
+				const sheetLabel = identity.className ? `${identity.className} (${identity.classId})` : identity.classId
+				const proceed = confirm(
+					`This spreadsheet belongs to "${sheetLabel}".\n\n` +
+					`Do you want to import this data into the current class?\n\n` +
+					`The data will be adopted and associated with your current class.`
+				)
+				if (!proceed) {
+					throw new Error('Import cancelled.')
+				}
+				sourceClassId = identity.classId
+				adoptMode = true
 			}
 			// Read headers to verify schema, then read bodies
 			const [_classesRows, studentRows, sessionsRows, marksRows, ledgerRows, settingsRows] = await Promise.all([
@@ -879,12 +905,14 @@ export const useStore = create<Store>((set, get) => ({
 			const studentErrors: string[] = []
 			let invalidStudents = 0
 			for (const [idx, row] of studentsBody.entries()) {
-				const parsed = validateStudentRow(row, classId)
+				const parsed = validateStudentRow(row, sourceClassId)
 				if (!parsed) {
 					invalidStudents += 1
 					sampleErrors(studentErrors, `Students row ${idx + 2}: invalid or mismatched classId`)
 					continue
 				}
+				// If adopting, rewrite classId to the local class
+				if (adoptMode) parsed.classId = classId
 				students.push(parsed)
 			}
 			logValidationResults('Students', studentsBody.length, students)
@@ -893,7 +921,7 @@ export const useStore = create<Store>((set, get) => ({
 			const sessionErrors: string[] = []
 			let invalidSessions = 0
 			for (const [idx, row] of sessionsBody.entries()) {
-				const parsed = validateSessionRow(row, classId)
+				const parsed = validateSessionRow(row, sourceClassId)
 				if (!parsed) {
 					invalidSessions += 1
 					sampleErrors(sessionErrors, `Sessions row ${idx + 2}: invalid or mismatched classId/date`)
@@ -901,6 +929,8 @@ export const useStore = create<Store>((set, get) => ({
 				}
 				const picks = parseCsvList(row[5])
 				const carryoverIds = parseCsvList(row[7])
+				// If adopting, rewrite classId to the local class
+				if (adoptMode) parsed.classId = classId
 				sessions.push({
 					...parsed,
 					picks,
@@ -927,12 +957,14 @@ export const useStore = create<Store>((set, get) => ({
 			const ledgerErrors: string[] = []
 			let invalidLedger = 0
 			for (const [idx, row] of ledgerBody.entries()) {
-				const parsed = validateLedgerRow(row, classId)
+				const parsed = validateLedgerRow(row, sourceClassId)
 				if (!parsed) {
 					invalidLedger += 1
 					sampleErrors(ledgerErrors, `Ledger row ${idx + 2}: invalid or mismatched classId/date`)
 					continue
 				}
+				// If adopting, rewrite classId to the local class
+				if (adoptMode) parsed.classId = classId
 				ledgerEntries.push({ item: parsed, rowNumber: idx + 2 })
 			}
 			logValidationResults('Ledger', ledgerBody.length, ledgerEntries.map((e) => e.item))
@@ -1040,7 +1072,9 @@ export const useStore = create<Store>((set, get) => ({
 				// Settings (only apply for this class if present)
 				if (settingsBody.length) {
 					const classIdIdx = settingsIndex.get('classId') ?? 0
-					const row = settingsBody.find((r) => String(r[classIdIdx] ?? '') === classId)
+					// In adopt mode, look for the source classId's settings row
+					const lookupClassId = adoptMode ? sourceClassId : classId
+					const row = settingsBody.find((r) => String(r[classIdIdx] ?? '') === lookupClassId)
 					if (row) {
 						await db.settings.put({
 							classId,
@@ -1053,9 +1087,32 @@ export const useStore = create<Store>((set, get) => ({
 					}
 				}
 			})
+			// If we adopted data, update the spreadsheet's identity to match the local class
+			if (adoptMode) {
+				try {
+					const cls = await db.classes.get(classId)
+					const settings = await db.settings.get(classId)
+					await ensureCheckpointSettingsHeader(spreadsheetId)
+					await clearSheetData(spreadsheetId, 'Settings')
+					await appendRows(spreadsheetId, 'Settings', [[
+						classId,
+						cls?.name ?? '',
+						settings?.defaultN ?? cls?.defaultN ?? DEFAULT_N,
+						settings?.neverSeenWeight ?? DEFAULT_NEVER_SEEN_WEIGHT,
+						settings?.cooldownWeight ?? DEFAULT_COOLDOWN_WEIGHT,
+						CHECKPOINT_SETTINGS_SCHEMA_VERSION,
+						'',
+					]])
+				} catch (err) {
+					console.warn('[Store]', 'Failed to update spreadsheet identity after adopt', err)
+				}
+			}
 			finalizeSyncReport(report, 'ok')
 			// eslint-disable-next-line no-alert
-			alert('Import completed and local data overwritten for this class.')
+			alert(adoptMode
+				? 'Import completed! Data adopted and spreadsheet linked to this class.'
+				: 'Import completed and local data overwritten for this class.'
+			)
 		} catch (e) {
 			opError = (e as Error).message
 			finalizeSyncReport(report, 'failed', opError)
@@ -1088,7 +1145,17 @@ export const useStore = create<Store>((set, get) => ({
 			}
 			if (identity.classId && identity.classId !== classId) {
 				const sheetLabel = identity.className ? `${identity.className} (${identity.classId})` : identity.classId
-				throw new Error(`Spreadsheet belongs to ${sheetLabel}, not the selected class.`)
+				if (!opts?.silent) {
+					const proceed = confirm(
+						`This spreadsheet belongs to ${sheetLabel}.\n\n` +
+						`Do you want to reassign it to the current class (${cls?.name || classId})?\n\n` +
+						`This will overwrite the spreadsheet's class identity metadata.`
+					)
+					if (!proceed) {
+						throw new Error('Reassignment cancelled.')
+					}
+				}
+				// Allow reassignment - continue to overwrite Settings sheet
 			}
 			await ensureCheckpointSettingsHeader(spreadsheetId)
 			await clearSheetData(spreadsheetId, 'Settings')
