@@ -4,7 +4,7 @@ This document started as a v1 plan. It has been updated to reflect what is imple
 
 ## Status Summary
 Implemented core v1. Remaining gaps are mostly UX polish and a few planned features:
-- Not implemented: delete class; normalized roster export; flexible column mapping UI; History filters/search; Playwright E2E.
+- Not implemented: normalized roster export; flexible column mapping UI; History filters/search; Playwright E2E.
 - Partially implemented: per-class CSV output "append" behavior (optional file handle exists, but current write behavior is not a true append and does not write headers).
 - Partially implemented: Session UI "absence count badge" (Roster shows derived counts; Session view does not currently display counts).
 
@@ -47,7 +47,7 @@ Entity types are defined in `web/src/types.ts`:
 
 Derived behavior:
 - Carryovers are derived from (ledger + the most recent Present marks).
-- Absence count is derived from ledger (no cached counter stored).
+- Absence count is derived from ledger (no cached counter stored). Roster derives per-class counts in batch to avoid N+1 IndexedDB count queries.
 
 ## Selection Algorithm (per class, implemented)
 1. Carryovers: students with an absence more recent than their most recent present mark.
@@ -86,6 +86,7 @@ Notes:
 
 ## Testing (current)
 - Unit: carryovers, eligibility/weights, cooldown logic; sync/conflict helpers; import validation.
+- Unit: Google Sheets helpers (spreadsheet ID normalization + sheet identity probe parsing).
 - Integration: basic behaviors are covered indirectly; no dedicated UI/integration harness.
 - E2E: not implemented (no Playwright test suite wired up).
 
@@ -99,4 +100,5 @@ Notes:
 - CSV variability: add a column-mapper UI and store per-class mapping. (Pending)
 - Offline reliability: Dexie transactions used for save/import/export paths. (Implemented)
 - Performance: keep sampling and derived computations light; add memoization/indexing if rosters grow large. (Ongoing)
+- External sync safety: Sheets import is validate→commit (fail-closed) and records a bounded sync report to `localStorage['checkpoint_last_sync_report_<classId>']`. (Implemented)
 

@@ -126,3 +126,14 @@ export function isCarryover(
 export function countAbsences(studentId: string, ledger: LedgerEntry[]): number {
     return ledger.filter((l) => l.studentId === studentId).length
 }
+
+/**
+ * Build a per-student absence count map from ledger entries.
+ */
+export function countAbsencesByStudent(ledger: LedgerEntry[]): Map<string, number> {
+    const counts = new Map<string, number>()
+    for (const entry of ledger) {
+        counts.set(entry.studentId, (counts.get(entry.studentId) || 0) + 1)
+    }
+    return counts
+}

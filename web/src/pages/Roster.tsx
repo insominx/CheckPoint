@@ -13,30 +13,26 @@ interface StudentDisplay {
 }
 
 export default function Roster() {
-	const { selectedClassId, getStudents, getAbsenceCount } = useStore()
+	const { selectedClassId, getStudentsWithAbsenceCounts } = useStore()
 	const [students, setStudents] = useState<StudentDisplay[]>([])
 	const [sortKey, setSortKey] = useState<'first' | 'last' | 'absences'>('first')
 	const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
 
 	async function loadStudentsWithCounts() {
 		if (!selectedClassId) return
-		const rawStudents = await getStudents()
-		// Get absence counts from ledger (single source of truth)
-		const withCounts = await Promise.all(
-			rawStudents.map(async (s) => ({
-				id: s.id,
-				displayName: s.displayName,
-				firstName: s.firstName,
-				lastName: s.lastName,
-				absenceCount: await getAbsenceCount(s.id),
-			})),
-		)
-		setStudents(withCounts)
+		const withCounts = await getStudentsWithAbsenceCounts()
+		setStudents(withCounts.map((s) => ({
+			id: s.id,
+			displayName: s.displayName,
+			firstName: s.firstName,
+			lastName: s.lastName,
+			absenceCount: s.absenceCount ?? 0,
+		})))
 	}
 
 	useEffect(() => {
 		loadStudentsWithCounts()
-	}, [selectedClassId, getStudents])
+	}, [selectedClassId, getStudentsWithAbsenceCounts])
 
 	// Sorted copy for rendering
 	const sorted = [...students].sort((a, b) => {
@@ -91,6 +87,29 @@ export default function Roster() {
 								if (!file || !selectedClassId) return
 								const rows = await parseRosterCsv(file)
 								const entities = toStudentEntities(selectedClassId, rows, uuidv4)
+								const idCounts = new Map<string, number>()
+								for (const s of entities) {
+									idCounts.set(s.id, (idCounts.get(s.id) || 0) + 1)
+								}
+								const duplicateIds = Array.from(idCounts.entries())
+									.filter(([, count]) => count > 1)
+									.map(([id]) => id)
+								if (duplicateIds.length) {
+									alert(`Import blocked: ${duplicateIds.length} duplicate studentId values in the CSV. Each studentId must be unique within a class.`)
+									return
+								}
+								const uniqueIds = Array.from(idCounts.keys())
+								const existing = await db.students.bulkGet(uniqueIds)
+								const collisions = existing
+									.map((student, idx) => {
+										if (!student || student.classId === selectedClassId) return null
+										return { id: uniqueIds[idx], classId: student.classId }
+									})
+									.filter((entry): entry is { id: string; classId: string } => entry !== null)
+								if (collisions.length) {
+									alert(`Import blocked: ${collisions.length} studentId values already exist in another class. Student IDs must be globally unique with current storage.`)
+									return
+								}
 								await db.transaction('rw', db.students, async () => {
 									for (const s of entities) {
 										await db.students.put(s)

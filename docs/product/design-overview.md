@@ -43,10 +43,12 @@
 - Absence counts tracked per student
 - Absence ledger records every absence with date, reason, and student ID
 - Present marks clear carryover status
+  - **Note**: Absence counts are derived from the per-class ledger (not cached).
 
 ### 5. Data Import/Export
 - CSV roster import with header-based fields (missing columns/values are treated as empty)
 - Auto-generates stable UUIDs for students missing IDs
+- Roster import is **fail-closed** for identity safety: imports are blocked if `studentId` duplicates exist in the CSV or if a `studentId` would collide with an existing student in a different class (current local storage keys students by `id`).
 - Per-class absence CSV export for external record-keeping
 - Optional Google Sheets integration for cloud backup
 
@@ -132,8 +134,32 @@
 4. **Append-Only Ledger**: Absences logged immutably for reliable history
 5. **Desktop-First, Mobile-Friendly**: Optimized for laptop use, responsive design
 6. **Ledger as Single Source of Truth**: Absence counts derived from ledger, not cached
+7. **Fail-Closed External Import**: Google Sheets is user-editable, so imports validate strictly and avoid destructive local overwrites on invalid data.
+8. **Operation-Scoped UI Status**: UI “loading/error” is tracked per operation (pick/save/export/import/repair) to avoid cross-feature state clobbering.
 
 ---
+
+## State Management Notes (implementation-aligned)
+
+- **Single authority**
+  - `web/src/store.ts` is the orchestration authority for domain operations and external sync.
+  - Durable state is in IndexedDB via Dexie (`web/src/db.ts`).
+
+- **Operation-scoped async status**
+  - Store tracks per-operation status under `opStatus` (e.g., `pickStudents`, `saveSession`, `exportSheets`, `importSheets`, `repairSheets`) rather than one global “loading” flag.
+  - Motivation: prevent Sheets ops from disabling or overwriting Session pick/redraw/save UI state.
+
+- **Sheets import safety**
+  - Imports are guarded by “identity before I/O” (`probeCheckpointSpreadsheetIdentity` in `web/src/google.ts`).
+  - Import is **validate → commit**:
+    - Validate Students/Sessions/Marks/Ledger rows.
+    - Check referential integrity (e.g., marks/ledger do not reference missing students/sessions).
+    - Only then perform the destructive local overwrite transaction.
+
+- **Sync report artifact**
+  - After Sheets export/import/repair, the store writes a bounded JSON report to:
+    - `localStorage['checkpoint_last_sync_report_<classId>']`
+  - Intended use: reproducible debugging without adding telemetry.
 
 ## Testing
 
@@ -145,6 +171,7 @@ Run: `cd web && npm test`
 
 **Tested modules:**
 - `attendance.ts` — Carryover computation, weight calculation
+- `google.ts` — Spreadsheet ID parsing and identity probing (unit tests)
 - `sync.ts` — Conflict detection, operation guards
 - `validation.ts` — Input validation for entities
 

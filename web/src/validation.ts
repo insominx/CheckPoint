@@ -3,7 +3,7 @@
  * Ensures imported data meets basic integrity requirements.
  */
 
-import type { StudentEntity, SessionEntity, AbsenceLedgerItem } from './types'
+import type { StudentEntity, SessionEntity, AbsenceLedgerItem, Mark } from './types'
 
 /**
  * Validate and parse a student row from imported data.
@@ -87,6 +87,9 @@ export function validateLedgerRow(row: unknown[], classId: string): AbsenceLedge
     // Class ID must match
     if (rowClassId && rowClassId !== classId) return null
 
+	// Validate date format (basic ISO check)
+	if (!isValidISODate(date)) return null
+
     return {
         id,
         classId,
@@ -96,6 +99,34 @@ export function validateLedgerRow(row: unknown[], classId: string): AbsenceLedge
         reason: parseAbsenceReason(row[6]),
         notes: String(row[7] ?? '') || undefined,
     }
+}
+
+/**
+ * Validate and parse a marks row from imported data.
+ * Returns null if the row is invalid.
+ */
+export function validateMarkRow(row: unknown[]): { sessionId: string; studentId: string; mark: Mark } | null {
+	const sessionId = String(row[0] ?? '').trim()
+	const studentId = String(row[1] ?? '').trim()
+	const statusRaw = String(row[3] ?? '').toLowerCase().trim()
+	const reasonRaw = String(row[4] ?? '').toLowerCase().trim()
+	const markedAtRaw = String(row[5] ?? '').trim()
+
+	if (!sessionId || !studentId) return null
+	if (statusRaw !== 'present' && statusRaw !== 'absent') return null
+	if (markedAtRaw && !isValidISODate(markedAtRaw)) return null
+
+	const reason = reasonRaw === 'excused' ? 'excused' : reasonRaw === 'unexcused' ? 'unexcused' : undefined
+
+	return {
+		sessionId,
+		studentId,
+		mark: {
+			status: statusRaw as Mark['status'],
+			reason,
+			markedAt: markedAtRaw || undefined,
+		},
+	}
 }
 
 /**

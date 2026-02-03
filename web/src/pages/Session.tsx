@@ -5,10 +5,13 @@ import type { AbsenceReason } from '../types'
 
 export default function Session() {
 	const navigate = useNavigate()
-	const { selectedClassId, currentSession, pickStudents, redrawRandom, markStudent, saveSession, currentN, isLoading, isPickingStudents, getStudents } = useStore()
+	const { selectedClassId, currentSession, pickStudents, redrawRandom, markStudent, saveSession, currentN, isPickingStudents, opStatus, getStudents } = useStore()
 	const [studentNamesById, setStudentNamesById] = useState<Record<string, string>>({})
 	const [reasonById, setReasonById] = useState<Record<string, AbsenceReason>>({})
 	const [redrawMessage, setRedrawMessage] = useState<string | null>(null)
+	const pickInProgress = opStatus.pickStudents.inProgress || isPickingStudents
+	const saveInProgress = opStatus.saveSession.inProgress
+	const actionBusy = pickInProgress || saveInProgress
 
 	useEffect(() => {
 		if (!selectedClassId) navigate('/')
@@ -59,7 +62,7 @@ export default function Session() {
 		return (
 			<div style={{ padding: 16 }}>
 				<h2>Session</h2>
-				<button onClick={() => pickStudents()} disabled={!selectedClassId || isLoading || isPickingStudents}>
+				<button onClick={() => pickStudents()} disabled={!selectedClassId || pickInProgress}>
 					Generate Picks (N={currentN})
 				</button>
 			</div>
@@ -75,9 +78,9 @@ export default function Session() {
 			<div className="banner">Carryovers included automatically (not capped).</div>
 			<div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
 				<span style={{ opacity: 0.8 }}>{markedCount}/{currentSession.picks.length} marked</span>
-				<button onClick={handleRedraw} disabled={isLoading || isPickingStudents}>Re-draw</button>
+				<button onClick={handleRedraw} disabled={actionBusy}>Re-draw</button>
 				<button
-					disabled={!allMarked || isLoading || isPickingStudents}
+					disabled={!allMarked || actionBusy}
 					onClick={async () => {
 						await saveSession()
 						navigate('/')

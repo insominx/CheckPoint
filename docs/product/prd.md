@@ -16,6 +16,7 @@ Non-Goals (v1): Full SIS integration, seating charts, tardy tracking, parental n
 - Class: A course/section with its own roster and history; attendance logic is scoped per class.
 - Roster: List of enrolled students for a class with stable identifiers (`studentId` + name).
   - If `studentId` is missing/blank on import, the app generates a UUID and stores it in IndexedDB (it does not modify the original CSV file).
+  - **Important (current storage constraint)**: `studentId` values must be **globally unique across all classes** within the app. If a CSV import would reuse a `studentId` that already exists in another class, the import is blocked to prevent silent cross-class overwrites.
 - Present: Explicitly marked present in a session (per class).
 - Absent: Explicitly marked absent in a session (per class), with optional reason.
 - Carryover (Recheck): Student marked absent in the most recent session and not yet subsequently marked present (derived per class). Must appear in every new session until cleared.
@@ -82,6 +83,9 @@ Derived concepts:
 - CSV must include a header row. Parsed headers (see `web/src/utils/csv.ts`): `studentId,firstName,lastName,displayName,loginId,sisId,className`.
   - Missing columns/values are treated as empty.
   - If `studentId` is missing/blank, the app generates a UUID for that student during import.
+  - Import is **fail-closed** for identity safety:
+    - If the CSV contains duplicate `studentId` values within the file, import is blocked.
+    - If the CSV contains a `studentId` that already exists in a different class, import is blocked (current Dexie schema keys students by `id`).
   - `className` is currently ignored by import logic; all imported rows are assigned to the currently selected class.
 - Extra columns are ignored by the app.
 
@@ -169,6 +173,8 @@ Settings:
 - CSV: Papaparse (Roster import + History export).
 - Sampling: Weighted random without replacement using `seedrandom` (`web/src/sampling.ts`); weights configurable per class (Settings).
 - Sync: Google Sheets export/import implemented in `web/src/google.ts` (requires `VITE_GOOGLE_CLIENT_ID`).
+  - Sheets import is **fail-closed**: data is validated (Students/Sessions/Marks/Ledger) and referential integrity is checked before any destructive local overwrite.
+  - After Sheets export/import/repair, a bounded sync report is persisted at `localStorage['checkpoint_last_sync_report_<classId>']`.
 - Testing: Vitest (no Playwright configured in this repo).
 - Build: PWA via `vite-plugin-pwa` (auto-update).
 

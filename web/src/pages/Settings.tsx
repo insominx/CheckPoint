@@ -4,7 +4,7 @@ import { db } from '../db' // Needed for CSV file handle operations
 import { createAndInitSpreadsheetForCheckPoint, getAccessToken, normalizeAndValidateSpreadsheetId, ensureCheckpointSheets, probeCheckpointSpreadsheetIdentity } from '../google'
 
 export default function Settings() {
-	const { selectedClassId, getClassSettings, updateClassSettings, exportCurrentClassToSheets, importCurrentClassFromSheets, repairCurrentClassSpreadsheetIdentity } = useStore()
+	const { selectedClassId, getClassSettings, updateClassSettings, exportCurrentClassToSheets, importCurrentClassFromSheets, repairCurrentClassSpreadsheetIdentity, opStatus } = useStore()
 	const [defaultN, setDefaultN] = useState(5)
 	const [neverSeenWeight, setNeverSeenWeight] = useState(2)
 	const [cooldownWeight, setCooldownWeight] = useState(0.5)
@@ -13,6 +13,10 @@ export default function Settings() {
 	const [activeClassName, setActiveClassName] = useState<string | undefined>(undefined)
 	const [isAuthReady, setIsAuthReady] = useState(false)
 	const [busy, setBusy] = useState(false)
+	const exportBusy = opStatus.exportSheets.inProgress
+	const importBusy = opStatus.importSheets.inProgress
+	const repairBusy = opStatus.repairSheets.inProgress
+	const syncBusy = exportBusy || importBusy || repairBusy
 
 	useEffect(() => {
 		; (async () => {
@@ -102,7 +106,7 @@ export default function Settings() {
 						<h3 style={{ margin: '4px 0' }}>Google Sheets</h3>
 						<div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
 							<button
-								disabled={busy}
+								disabled={busy || syncBusy}
 								onClick={async () => {
 									try {
 										setBusy(true)
@@ -120,7 +124,7 @@ export default function Settings() {
 							</button>
 
 							<button
-								disabled={busy}
+								disabled={busy || syncBusy}
 								onClick={async () => {
 									if (!selectedClassId) return
 									try {
@@ -161,7 +165,7 @@ export default function Settings() {
 								/>
 							</label>
 							<button
-								disabled={busy}
+								disabled={busy || syncBusy}
 								onClick={async () => {
 									if (!selectedClassId || !spreadsheetId) return
 									try {
@@ -181,7 +185,7 @@ export default function Settings() {
 								Save ID
 							</button>
 							<button
-								disabled={busy || !selectedClassId || !spreadsheetId}
+								disabled={busy || syncBusy || !selectedClassId || !spreadsheetId}
 								onClick={async () => {
 									if (!selectedClassId || !spreadsheetId) return
 									try {
@@ -212,7 +216,7 @@ export default function Settings() {
 								Open Spreadsheet
 							</button>
 							<button
-								disabled={busy || !selectedClassId || !spreadsheetId}
+								disabled={busy || syncBusy || !selectedClassId || !spreadsheetId}
 								onClick={async () => {
 									try {
 										setBusy(true)
@@ -236,7 +240,7 @@ export default function Settings() {
 						) : null}
 						<div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
 							<button
-								disabled={busy || !selectedClassId}
+								disabled={busy || exportBusy || !selectedClassId}
 								onClick={async () => {
 									try {
 										setBusy(true)
@@ -257,7 +261,7 @@ export default function Settings() {
 								Sync to Google Sheets
 							</button>
 							<button
-								disabled={busy || !selectedClassId}
+								disabled={busy || importBusy || !selectedClassId}
 								onClick={async () => {
 									try {
 										setBusy(true)
@@ -279,7 +283,7 @@ export default function Settings() {
 							</button>
 							<button
 								style={{ opacity: 0.8 }}
-								disabled={busy || !selectedClassId}
+								disabled={busy || exportBusy || !selectedClassId}
 								onClick={async () => {
 									try {
 										setBusy(true)

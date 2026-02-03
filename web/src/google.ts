@@ -359,8 +359,7 @@ function buildHeaderIndex(headers: string[]): Map<string, number> {
 	return map
 }
 
-async function readClassIdentityFromClasses(spreadsheetId: string): Promise<{ classIds: string[]; classNameById: Map<string, string> }> {
-	const rows = await readValues(spreadsheetId, 'Classes!A2:B')
+function readClassIdentityFromClassesRows(rows: (string | null)[][]): { classIds: string[]; classNameById: Map<string, string> } {
 	const classNameById = new Map<string, string>()
 	const ids: string[] = []
 	for (const r of rows) {
@@ -372,6 +371,93 @@ async function readClassIdentityFromClasses(spreadsheetId: string): Promise<{ cl
 		}
 	}
 	return { classIds: ids, classNameById }
+}
+
+function parseSettingsRows(settingsRows: (string | null)[][]) {
+	const header = (settingsRows[0] || []).map((h) => normalizeHeaderCell(h as any))
+	const body = settingsRows.slice(1).filter((r) => r.some((c) => normalizeHeaderCell(c as any) !== ''))
+	const headerIndex = buildHeaderIndex(header)
+	const classIdIdx = headerIndex.get('classId')
+	const classNameIdx = headerIndex.get('className')
+	const schemaIdx = headerIndex.get('schemaVersion')
+	const lastExportedIdx = headerIndex.get('lastExportedAt')
+	const hasIdentityHeaders = classNameIdx !== undefined && schemaIdx !== undefined && lastExportedIdx !== undefined
+
+	const classIds = classIdIdx === undefined ? [] : Array.from(
+		new Set(
+			body
+				.map((r) => normalizeHeaderCell(r?.[classIdIdx] as any))
+				.filter((id) => {
+					if (!id) return false
+					const lower = id.toLowerCase()
+					return !/^class\s*id$/.test(lower)
+				}),
+		),
+	)
+
+	return {
+		header,
+		body,
+		classIdIdx,
+		classNameIdx,
+		schemaIdx,
+		lastExportedIdx,
+		hasIdentityHeaders,
+		classIds,
+	}
+}
+
+function buildIdentityFromClasses(rows: (string | null)[][]): SpreadsheetIdentityProbe {
+	const fallback = readClassIdentityFromClassesRows(rows)
+	if (fallback.classIds.length === 1) {
+		const onlyId = fallback.classIds[0]
+		return {
+			isLegacy: true,
+			classId: onlyId,
+			className: fallback.classNameById.get(onlyId),
+		}
+	}
+	if (fallback.classIds.length > 1) {
+		return { isLegacy: true, multipleClassIds: fallback.classIds }
+	}
+	return { isLegacy: true }
+}
+
+export function deriveCheckpointSpreadsheetIdentity(
+	settingsRows: (string | null)[][],
+	classesRows: (string | null)[][] = [],
+): SpreadsheetIdentityProbe {
+	if (!settingsRows.length) {
+		return { isLegacy: true }
+	}
+
+	const parsed = parseSettingsRows(settingsRows)
+	if (parsed.classIdIdx === undefined) {
+		return buildIdentityFromClasses(classesRows)
+	}
+
+	if (parsed.classIds.length > 1) {
+		return { isLegacy: !parsed.hasIdentityHeaders, multipleClassIds: parsed.classIds }
+	}
+
+	if (parsed.classIds.length === 1) {
+		const classId = parsed.classIds[0]
+		const row = parsed.body.find((r) => normalizeHeaderCell(r?.[parsed.classIdIdx as number] as any) === classId) || []
+		const className = parsed.classNameIdx !== undefined ? normalizeHeaderCell(row?.[parsed.classNameIdx] as any) : undefined
+		const schemaVersion = parsed.schemaIdx !== undefined ? normalizeHeaderCell(row?.[parsed.schemaIdx] as any) : undefined
+		const lastExportedAt = parsed.lastExportedIdx !== undefined
+			? normalizeHeaderCell(row?.[parsed.lastExportedIdx] as any)
+			: normalizeHeaderCell(row?.[4] as any)
+		return {
+			isLegacy: !parsed.hasIdentityHeaders,
+			classId,
+			className,
+			schemaVersion,
+			lastExportedAt: lastExportedAt || undefined,
+		}
+	}
+
+	return buildIdentityFromClasses(classesRows)
 }
 
 export async function ensureCheckpointSettingsHeader(spreadsheetId: string): Promise<void> {
@@ -388,79 +474,12 @@ export async function probeCheckpointSpreadsheetIdentity(spreadsheetId: string):
 	if (!settingsRows.length) {
 		return { isLegacy: true }
 	}
-	const header = (settingsRows[0] || []).map((h) => normalizeHeaderCell(h as any))
-	const body = settingsRows.slice(1).filter((r) => r.some((c) => normalizeHeaderCell(c as any) !== ''))
-	const headerIndex = buildHeaderIndex(header)
-	const classIdIdx = headerIndex.get('classId')
-	const classNameIdx = headerIndex.get('className')
-	const schemaIdx = headerIndex.get('schemaVersion')
-	const lastExportedIdx = headerIndex.get('lastExportedAt')
-
-	const hasIdentityHeaders = classNameIdx !== undefined && schemaIdx !== undefined && lastExportedIdx !== undefined
-
-	if (classIdIdx === undefined) {
-		const fallback = await readClassIdentityFromClasses(spreadsheetId)
-		if (fallback.classIds.length === 1) {
-			const onlyId = fallback.classIds[0]
-			return {
-				isLegacy: true,
-				classId: onlyId,
-				className: fallback.classNameById.get(onlyId),
-			}
-		}
-		if (fallback.classIds.length > 1) {
-			return { isLegacy: true, multipleClassIds: fallback.classIds }
-		}
-		return { isLegacy: true }
+	const parsed = parseSettingsRows(settingsRows)
+	let classesRows: (string | null)[][] = []
+	if (parsed.classIdIdx === undefined || parsed.classIds.length === 0) {
+		classesRows = await readValues(spreadsheetId, 'Classes!A2:B')
 	}
-
-	const classIds = Array.from(
-		new Set(
-			body
-				.map((r) => normalizeHeaderCell(r?.[classIdIdx] as any))
-				.filter((id) => {
-					if (!id) return false
-					const lower = id.toLowerCase()
-					return !/^class\s*id$/.test(lower)
-				}),
-		),
-	)
-
-	if (classIds.length > 1) {
-		return { isLegacy: !hasIdentityHeaders, multipleClassIds: classIds }
-	}
-
-	if (classIds.length === 1) {
-		const classId = classIds[0]
-		const row = body.find((r) => normalizeHeaderCell(r?.[classIdIdx] as any) === classId) || []
-		const className = classNameIdx !== undefined ? normalizeHeaderCell(row?.[classNameIdx] as any) : undefined
-		const schemaVersion = schemaIdx !== undefined ? normalizeHeaderCell(row?.[schemaIdx] as any) : undefined
-		const lastExportedAt = lastExportedIdx !== undefined
-			? normalizeHeaderCell(row?.[lastExportedIdx] as any)
-			: normalizeHeaderCell(row?.[4] as any)
-		return {
-			isLegacy: !hasIdentityHeaders,
-			classId,
-			className,
-			schemaVersion,
-			lastExportedAt: lastExportedAt || undefined,
-		}
-	}
-
-	// No class IDs in Settings body; fall back to Classes tab
-	const fallback = await readClassIdentityFromClasses(spreadsheetId)
-	if (fallback.classIds.length === 1) {
-		const onlyId = fallback.classIds[0]
-		return {
-			isLegacy: true,
-			classId: onlyId,
-			className: fallback.classNameById.get(onlyId),
-		}
-	}
-	if (fallback.classIds.length > 1) {
-		return { isLegacy: true, multipleClassIds: fallback.classIds }
-	}
-	return { isLegacy: true }
+	return deriveCheckpointSpreadsheetIdentity(settingsRows, classesRows)
 }
 
 

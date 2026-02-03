@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { validateStudentRow, validateSessionRow, validateLedgerRow, isValidISODate } from './validation'
+import { validateStudentRow, validateSessionRow, validateLedgerRow, validateMarkRow, isValidISODate } from './validation'
 
 describe('validateStudentRow', () => {
     const classId = 'class-1'
@@ -89,6 +89,11 @@ describe('validateLedgerRow', () => {
         expect(validateLedgerRow(row, classId)).toBeNull()
     })
 
+	it('returns null when date is invalid', () => {
+		const row = ['ledger-1', 'class-1', 'student-1', 'John Doe', 'not-a-date']
+		expect(validateLedgerRow(row, classId)).toBeNull()
+	})
+
     it('parses reason correctly', () => {
         const row = ['ledger-1', 'class-1', 'student-1', '', '2024-01-15T10:00:00Z', '', 'UNEXCUSED']
         const result = validateLedgerRow(row, classId)
@@ -100,6 +105,28 @@ describe('validateLedgerRow', () => {
         const result = validateLedgerRow(row, classId)
         expect(result?.reason).toBeUndefined()
     })
+})
+
+describe('validateMarkRow', () => {
+	it('returns valid mark for complete row', () => {
+		const row = ['session-1', 'student-1', 'John Doe', 'absent', 'excused', '2024-01-15T10:00:00Z']
+		const result = validateMarkRow(row)
+		expect(result).not.toBeNull()
+		expect(result?.sessionId).toBe('session-1')
+		expect(result?.studentId).toBe('student-1')
+		expect(result?.mark.status).toBe('absent')
+		expect(result?.mark.reason).toBe('excused')
+	})
+
+	it('returns null when status is invalid', () => {
+		const row = ['session-1', 'student-1', '', 'maybe', '', '2024-01-15T10:00:00Z']
+		expect(validateMarkRow(row)).toBeNull()
+	})
+
+	it('returns null when markedAt is invalid', () => {
+		const row = ['session-1', 'student-1', '', 'present', '', 'not-a-date']
+		expect(validateMarkRow(row)).toBeNull()
+	})
 })
 
 describe('isValidISODate', () => {

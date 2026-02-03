@@ -4,6 +4,7 @@ import {
     computeEligibleWithWeights,
     isCarryover,
     countAbsences,
+    countAbsencesByStudent,
 } from './attendance'
 
 describe('computeCarryovers', () => {
@@ -154,5 +155,25 @@ describe('countAbsences', () => {
         expect(countAbsences('s1', ledger)).toBe(2)
         expect(countAbsences('s2', ledger)).toBe(1)
         expect(countAbsences('s3', ledger)).toBe(0)
+    })
+})
+
+describe('countAbsencesByStudent', () => {
+    it('returns a map with counts per student', () => {
+        const ledger = [
+            { studentId: 's1', date: '2024-01-10T10:00:00Z' },
+            { studentId: 's1', date: '2024-01-15T10:00:00Z' },
+            { studentId: 's2', date: '2024-01-10T10:00:00Z' },
+        ]
+
+        const result = countAbsencesByStudent(ledger)
+        expect(result.get('s1')).toBe(2)
+        expect(result.get('s2')).toBe(1)
+        expect(result.get('s3')).toBeUndefined()
+    })
+
+    it('returns an empty map when ledger is empty', () => {
+        const result = countAbsencesByStudent([])
+        expect(result.size).toBe(0)
     })
 })

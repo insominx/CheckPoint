@@ -14,8 +14,10 @@ import {
 } from './google'
 import type { AbsenceLedgerItem, ClassEntity, Mark, PerClassSettings, SessionEntity, StudentEntity } from './types'
 import { weightedSampleWithoutReplacement } from './sampling'
+import { countAbsencesByStudent } from './attendance'
 import { canStartOperation, shouldWarnAboutConflict } from './sync'
-import { validateStudentRow, logValidationResults } from './validation'
+import { validateStudentRow, validateSessionRow, validateLedgerRow, validateMarkRow, logValidationResults } from './validation'
+import type { SpreadsheetIdentityProbe } from './google'
 
 export interface SamplingStateByStudent {
 	studentId: string
@@ -29,9 +31,39 @@ interface UIState {
 	selectedClassId?: string
 	currentN: number
 	currentSession?: SessionEntity
-	isLoading: boolean
 	isPickingStudents: boolean // Guard flag for pickStudents race condition
+	opStatus: OperationStatusMap
+}
+
+type OperationKey = 'pickStudents' | 'saveSession' | 'exportSheets' | 'importSheets' | 'repairSheets'
+interface OperationStatus {
+	inProgress: boolean
 	error?: string
+	startedAt?: string
+	finishedAt?: string
+}
+type OperationStatusMap = Record<OperationKey, OperationStatus>
+
+type SyncReportOp = 'export' | 'import' | 'repair'
+type SyncReportResult = 'ok' | 'blocked' | 'failed'
+interface SyncReport {
+	version: '1'
+	op: SyncReportOp
+	classId: string
+	spreadsheetId?: string
+	startedAt: string
+	finishedAt?: string
+	elapsedMs?: number
+	identity?: SpreadsheetIdentityProbe
+	tabs?: Record<string, { rowsRead?: number; rowsWritten?: number }>
+	validation?: {
+		students?: { total: number; valid: number; invalid: number; sampleErrors: string[] }
+		sessions?: { total: number; valid: number; invalid: number; sampleErrors: string[] }
+		marks?: { total: number; valid: number; invalid: number; sampleErrors: string[] }
+		ledger?: { total: number; valid: number; invalid: number; sampleErrors: string[] }
+	}
+	result?: SyncReportResult
+	errorMessage?: string
 }
 
 type PickStudentsStatus = 'ok' | 'blocked' | 'no-class' | 'error'
@@ -70,8 +102,8 @@ interface Actions {
 	repairCurrentClassSpreadsheetIdentity: (opts?: { silent?: boolean }) => Promise<void>
 	/** Correct a mark on a past session. Updates session and ledger atomically. */
 	correctMark: (sessionId: string, studentId: string, newStatus: 'present' | 'absent', reason?: 'excused' | 'unexcused') => Promise<void>
-	/** Get absence count for a student from ledger (single source of truth). */
-	getAbsenceCount: (studentId: string) => Promise<number>
+	/** Get students with class-scoped absence counts from ledger (single source of truth). */
+	getStudentsWithAbsenceCounts: () => Promise<Array<StudentEntity & { absenceCount: number }>>
 	/** Get detailed session info including student names for the History UI. */
 	getSessionDetails: (sessionId: string) => Promise<{ session: SessionEntity; studentNames: Record<string, string> } | null>
 }
@@ -81,6 +113,87 @@ type Store = UIState & Actions
 const DEFAULT_N = 5
 const DEFAULT_NEVER_SEEN_WEIGHT = 2.0
 const DEFAULT_COOLDOWN_WEIGHT = 0.5
+const DEFAULT_OP_STATUS: OperationStatusMap = {
+	pickStudents: { inProgress: false },
+	saveSession: { inProgress: false },
+	exportSheets: { inProgress: false },
+	importSheets: { inProgress: false },
+	repairSheets: { inProgress: false },
+}
+const MAX_SYNC_ERROR_SAMPLES = 5
+
+function updateOpStatus(
+	set: (partial: Partial<Store> | ((state: Store) => Partial<Store>)) => void,
+	op: OperationKey,
+	patch: Partial<OperationStatus>,
+) {
+	set((state) => ({
+		opStatus: {
+			...state.opStatus,
+			[op]: {
+				...state.opStatus[op],
+				...patch,
+			},
+		},
+	}))
+}
+
+function beginOp(
+	set: (partial: Partial<Store> | ((state: Store) => Partial<Store>)) => void,
+	op: OperationKey,
+) {
+	updateOpStatus(set, op, {
+		inProgress: true,
+		error: undefined,
+		startedAt: new Date().toISOString(),
+		finishedAt: undefined,
+	})
+}
+
+function endOp(
+	set: (partial: Partial<Store> | ((state: Store) => Partial<Store>)) => void,
+	op: OperationKey,
+	error?: string,
+) {
+	updateOpStatus(set, op, {
+		inProgress: false,
+		error,
+		finishedAt: new Date().toISOString(),
+	})
+}
+
+function startSyncReport(op: SyncReportOp, classId: string): SyncReport {
+	return {
+		version: '1',
+		op,
+		classId,
+		startedAt: new Date().toISOString(),
+		tabs: {},
+	}
+}
+
+function finalizeSyncReport(report: SyncReport, result: SyncReportResult, errorMessage?: string) {
+	report.result = result
+	report.errorMessage = errorMessage
+	report.finishedAt = new Date().toISOString()
+	report.elapsedMs = Date.parse(report.finishedAt) - Date.parse(report.startedAt)
+}
+
+function writeSyncReport(report: SyncReport) {
+	try {
+		const key = `checkpoint_last_sync_report_${report.classId}`
+		localStorage.setItem(key, JSON.stringify(report))
+	} catch (e) {
+		console.debug('[Store] Failed to write sync report', e)
+	}
+}
+
+function parseCsvList(value: unknown): string[] {
+	return String(value ?? '')
+		.split(',')
+		.map((item) => item.trim())
+		.filter(Boolean)
+}
 
 async function buildDraftSession({
 	classId,
@@ -191,8 +304,8 @@ async function buildDraftSession({
 }
 
 export const useStore = create<Store>((set, get) => ({
-	isLoading: false,
 	isPickingStudents: false,
+	opStatus: { ...DEFAULT_OP_STATUS },
 	currentN: DEFAULT_N,
 	async loadClasses() {
 		const classes = await db.classes.toArray()
@@ -288,7 +401,9 @@ export const useStore = create<Store>((set, get) => ({
 		const hasExistingResult = !!get().currentSession && !allowExistingSession
 		if (!canStartOperation(get().isPickingStudents, hasExistingResult)) return 'blocked'
 
-		set({ isPickingStudents: true, isLoading: true, error: undefined })
+		beginOp(set, 'pickStudents')
+		set({ isPickingStudents: true })
+		let opError: string | undefined
 		try {
 			const session = await buildDraftSession({
 				classId,
@@ -300,10 +415,11 @@ export const useStore = create<Store>((set, get) => ({
 			set({ currentSession: session })
 			return 'ok'
 		} catch (e) {
-			set({ error: (e as Error).message })
+			opError = (e as Error).message
 			return 'error'
 		} finally {
-			set({ isLoading: false, isPickingStudents: false })
+			set({ isPickingStudents: false })
+			endOp(set, 'pickStudents', opError)
 		}
 	},
 	async redrawRandom(opts) {
@@ -331,51 +447,60 @@ export const useStore = create<Store>((set, get) => ({
 		const session = get().currentSession
 		const classId = get().selectedClassId
 		if (!session || !classId) return
+		beginOp(set, 'saveSession')
+		let opError: string | undefined
 		const nowISO = new Date().toISOString()
-		const sessionToSave: SessionEntity = { ...session, date: nowISO, savedAt: nowISO, createdAt: session.createdAt ?? session.date ?? nowISO }
-		await db.transaction('rw', db.sessions, db.ledger, async () => {
-			await db.sessions.add(sessionToSave)
-			const absentEntries: AbsenceLedgerItem[] = []
-			for (const [sid, mark] of Object.entries(sessionToSave.marks)) {
-				if (mark.status === 'absent') {
-					absentEntries.push({
-						id: uuidv4(),
-						classId,
-						studentId: sid,
-						date: sessionToSave.date,
-						sessionId: sessionToSave.id,
-						reason: mark.reason,
-					})
-				}
-			}
-			if (absentEntries.length) await db.ledger.bulkAdd(absentEntries)
-			// absenceCount is now derived from ledger — no caching
-		})
-
-		// Attempt CSV append via File System Access API if configured
 		try {
-			const settings = await db.settings.get(classId)
-			if (settings?.csvFileHandle) {
-				const handle: any = settings.csvFileHandle as any
-				const writable = await handle.createWritable()
-				const classStudents = await db.students.where('classId').equals(classId).toArray()
-				const nameById = new Map<string, string>(classStudents.map((s) => [s.id, s.displayName]))
-				const absentRows = Object.entries(sessionToSave.marks)
-					.filter(([, m]) => m.status === 'absent')
-					.map(([sid, m]) => {
-						const name = nameById.get(sid) ?? ''
-						return `${sessionToSave.date},${sid},${name},ABSENT,${m.reason ?? ''}\n`
-					})
-				await writable.write(absentRows.join(''))
-				await writable.close()
+			const sessionToSave: SessionEntity = { ...session, date: nowISO, savedAt: nowISO, createdAt: session.createdAt ?? session.date ?? nowISO }
+			await db.transaction('rw', db.sessions, db.ledger, async () => {
+				await db.sessions.add(sessionToSave)
+				const absentEntries: AbsenceLedgerItem[] = []
+				for (const [sid, mark] of Object.entries(sessionToSave.marks)) {
+					if (mark.status === 'absent') {
+						absentEntries.push({
+							id: uuidv4(),
+							classId,
+							studentId: sid,
+							date: sessionToSave.date,
+							sessionId: sessionToSave.id,
+							reason: mark.reason,
+						})
+					}
+				}
+				if (absentEntries.length) await db.ledger.bulkAdd(absentEntries)
+				// absenceCount is now derived from ledger — no caching
+			})
+
+			// Attempt CSV append via File System Access API if configured
+			try {
+				const settings = await db.settings.get(classId)
+				if (settings?.csvFileHandle) {
+					const handle: any = settings.csvFileHandle as any
+					const writable = await handle.createWritable()
+					const classStudents = await db.students.where('classId').equals(classId).toArray()
+					const nameById = new Map<string, string>(classStudents.map((s) => [s.id, s.displayName]))
+					const absentRows = Object.entries(sessionToSave.marks)
+						.filter(([, m]) => m.status === 'absent')
+						.map(([sid, m]) => {
+							const name = nameById.get(sid) ?? ''
+							return `${sessionToSave.date},${sid},${name},ABSENT,${m.reason ?? ''}\n`
+						})
+					await writable.write(absentRows.join(''))
+					await writable.close()
+				}
+			} catch (e) {
+				console.debug('[Store] CSV file handle write failed:', e)
 			}
+			if (classId) {
+				localStorage.removeItem(`checkpoint_draft_session_${classId}`)
+			}
+			set({ currentSession: undefined })
 		} catch (e) {
-			console.debug('[Store] CSV file handle write failed:', e)
+			opError = (e as Error).message
+			throw e
+		} finally {
+			endOp(set, 'saveSession', opError)
 		}
-		if (classId) {
-			localStorage.removeItem(`checkpoint_draft_session_${classId}`)
-		}
-		set({ currentSession: undefined })
 	},
 
 	async deleteSession(sessionId) {
@@ -471,8 +596,18 @@ export const useStore = create<Store>((set, get) => ({
 		})
 	},
 
-	async getAbsenceCount(studentId) {
-		return db.ledger.where('studentId').equals(studentId).count()
+	async getStudentsWithAbsenceCounts() {
+		const classId = get().selectedClassId
+		if (!classId) return []
+		const [students, ledger] = await Promise.all([
+			db.students.where('classId').equals(classId).toArray(),
+			db.ledger.where('classId').equals(classId).toArray(),
+		])
+		const counts = countAbsencesByStudent(ledger)
+		return students.map((s) => ({
+			...s,
+			absenceCount: counts.get(s.id) ?? 0,
+		}))
 	},
 
 	async getSessionDetails(sessionId) {
@@ -487,17 +622,22 @@ export const useStore = create<Store>((set, get) => ({
 	async exportCurrentClassToSheets(opts) {
 		const classId = get().selectedClassId
 		if (!classId) return
-		set({ isLoading: true, error: undefined })
+		beginOp(set, 'exportSheets')
+		const report = startSyncReport('export', classId)
+		let opError: string | undefined
 		try {
 			const cls = await db.classes.get(classId)
 			const settings = (await db.settings.get(classId)) as any
 			const preferredId = settings?.spreadsheetId as string | undefined
 			const title = `CheckPoint — ${cls?.name || classId}`
+			report.spreadsheetId = preferredId
 			console.log('[Store]', 'Export start', { classId, title, preferredId, opts })
 			const spreadsheetId = await ensureSpreadsheet(title, opts?.recreate ? undefined : preferredId)
+			report.spreadsheetId = spreadsheetId
 			await ensureCheckpointSheets(spreadsheetId)
 
 			const identity = await probeCheckpointSpreadsheetIdentity(spreadsheetId)
+			report.identity = identity
 			const classLabel = cls?.name ? `${cls.name} (${classId})` : classId
 			if (identity.multipleClassIds?.length) {
 				throw new Error(`Spreadsheet contains multiple class IDs: ${identity.multipleClassIds.join(', ')}`)
@@ -509,7 +649,7 @@ export const useStore = create<Store>((set, get) => ({
 			if (identity.isLegacy) {
 				const proceed = confirm('This spreadsheet does not declare class identity yet.\n\nExport will repair the metadata. Continue?')
 				if (!proceed) {
-					set({ isLoading: false })
+					finalizeSyncReport(report, 'blocked')
 					return
 				}
 			}
@@ -521,7 +661,7 @@ export const useStore = create<Store>((set, get) => ({
 				if (shouldWarnAboutConflict(remoteTimestamp, localTimestamp)) {
 					const overwrite = confirm('⚠️ This Sheet was modified more recently than your last export.\n\nOverwrite with local data?')
 					if (!overwrite) {
-						set({ isLoading: false })
+						finalizeSyncReport(report, 'blocked')
 						return
 					}
 				}
@@ -583,6 +723,7 @@ export const useStore = create<Store>((set, get) => ({
 				)
 			}
 			// Write Sessions + Marks
+			let marksWritten = 0
 			sessions.sort((a, b) => Date.parse(a.date) - Date.parse(b.date))
 			for (const s of sessions) {
 				const picksCSV = s.picks.join(',')
@@ -594,7 +735,10 @@ export const useStore = create<Store>((set, get) => ({
 				for (const [sid, mark] of Object.entries(s.marks)) {
 					markRows.push([s.id, sid, nameById.get(sid) ?? '', mark.status, mark.reason ?? null, (mark as any).markedAt ?? null])
 				}
-				if (markRows.length) await appendRows(spreadsheetId, 'Marks', markRows)
+				if (markRows.length) {
+					await appendRows(spreadsheetId, 'Marks', markRows)
+					marksWritten += markRows.length
+				}
 			}
 			// Write Ledger
 			if (ledger.length) {
@@ -625,6 +769,14 @@ export const useStore = create<Store>((set, get) => ({
 				CHECKPOINT_SETTINGS_SCHEMA_VERSION,
 				exportTimestamp,
 			]])
+			report.tabs = {
+				Classes: { rowsWritten: clsRow ? 1 : 0 },
+				Students: { rowsWritten: students.length },
+				Sessions: { rowsWritten: sessions.length },
+				Marks: { rowsWritten: marksWritten },
+				Ledger: { rowsWritten: ledger.length },
+				Settings: { rowsWritten: 1 },
+			}
 			// Always save spreadsheetId and timestamp locally
 			await db.settings.put({
 				classId,
@@ -634,28 +786,36 @@ export const useStore = create<Store>((set, get) => ({
 				spreadsheetId,
 				lastExportedAt: exportTimestamp,
 			})
+			finalizeSyncReport(report, 'ok')
 			// eslint-disable-next-line no-alert
 			alert('Sync to Google Sheets completed.')
 		} catch (e) {
+			opError = (e as Error).message
+			finalizeSyncReport(report, 'failed', opError)
 			console.error('[Store]', 'Export failed', e)
 			// eslint-disable-next-line no-alert
 			alert(`Sync failed: ${(e as Error).message}`)
 		} finally {
-			set({ isLoading: false })
+			writeSyncReport(report)
+			endOp(set, 'exportSheets', opError)
 		}
 	},
 
 	async importCurrentClassFromSheets() {
 		const classId = get().selectedClassId
 		if (!classId) return
-		set({ isLoading: true, error: undefined })
+		beginOp(set, 'importSheets')
+		const report = startSyncReport('import', classId)
+		let opError: string | undefined
 		try {
 			const st = (await db.settings.get(classId)) as any
 			const idRaw = st?.spreadsheetId as string | undefined
 			if (!idRaw) throw new Error('No Spreadsheet ID configured for this class')
 			const spreadsheetId = normalizeAndValidateSpreadsheetId(idRaw)
+			report.spreadsheetId = spreadsheetId
 			await ensureCheckpointSheets(spreadsheetId)
 			const identity = await probeCheckpointSpreadsheetIdentity(spreadsheetId)
+			report.identity = identity
 			if (identity.multipleClassIds?.length) {
 				throw new Error(`Spreadsheet contains multiple class IDs: ${identity.multipleClassIds.join(', ')}`)
 			}
@@ -681,6 +841,14 @@ export const useStore = create<Store>((set, get) => ({
 			const marksBody = getBody(marksRows)
 			const ledgerBody = getBody(ledgerRows)
 			const settingsBody = getBody(settingsRows)
+			report.tabs = {
+				Classes: { rowsRead: _classesRows.length },
+				Students: { rowsRead: studentsBody.length },
+				Sessions: { rowsRead: sessionsBody.length },
+				Marks: { rowsRead: marksBody.length },
+				Ledger: { rowsRead: ledgerBody.length },
+				Settings: { rowsRead: settingsBody.length },
+			}
 			const settingsHeader = (settingsRows?.[0] || []).map((h) => String(h ?? '').trim())
 			const settingsIndex = new Map<string, number>()
 			settingsHeader.forEach((key, idx) => {
@@ -693,6 +861,168 @@ export const useStore = create<Store>((set, get) => ({
 				return row?.[finalIdx]
 			}
 
+			const sampleErrors = (list: string[], message: string) => {
+				if (list.length < MAX_SYNC_ERROR_SAMPLES) list.push(message)
+			}
+			const findDuplicates = (values: string[]) => {
+				const seen = new Set<string>()
+				const dup = new Set<string>()
+				for (const v of values) {
+					if (!v) continue
+					if (seen.has(v)) dup.add(v)
+					else seen.add(v)
+				}
+				return Array.from(dup)
+			}
+
+			const students: StudentEntity[] = []
+			const studentErrors: string[] = []
+			let invalidStudents = 0
+			for (const [idx, row] of studentsBody.entries()) {
+				const parsed = validateStudentRow(row, classId)
+				if (!parsed) {
+					invalidStudents += 1
+					sampleErrors(studentErrors, `Students row ${idx + 2}: invalid or mismatched classId`)
+					continue
+				}
+				students.push(parsed)
+			}
+			logValidationResults('Students', studentsBody.length, students)
+
+			const sessions: SessionEntity[] = []
+			const sessionErrors: string[] = []
+			let invalidSessions = 0
+			for (const [idx, row] of sessionsBody.entries()) {
+				const parsed = validateSessionRow(row, classId)
+				if (!parsed) {
+					invalidSessions += 1
+					sampleErrors(sessionErrors, `Sessions row ${idx + 2}: invalid or mismatched classId/date`)
+					continue
+				}
+				const picks = parseCsvList(row[5])
+				const carryoverIds = parseCsvList(row[7])
+				sessions.push({
+					...parsed,
+					picks,
+					carryoverIds,
+					marks: {},
+				})
+			}
+			logValidationResults('Sessions', sessionsBody.length, sessions)
+
+			const marks: Array<{ sessionId: string; studentId: string; mark: Mark; rowNumber: number }> = []
+			const markErrors: string[] = []
+			let invalidMarks = 0
+			for (const [idx, row] of marksBody.entries()) {
+				const parsed = validateMarkRow(row)
+				if (!parsed) {
+					invalidMarks += 1
+					sampleErrors(markErrors, `Marks row ${idx + 2}: invalid status/sessionId/studentId/markedAt`)
+					continue
+				}
+				marks.push({ ...parsed, rowNumber: idx + 2 })
+			}
+
+			const ledgerEntries: Array<{ item: AbsenceLedgerItem; rowNumber: number }> = []
+			const ledgerErrors: string[] = []
+			let invalidLedger = 0
+			for (const [idx, row] of ledgerBody.entries()) {
+				const parsed = validateLedgerRow(row, classId)
+				if (!parsed) {
+					invalidLedger += 1
+					sampleErrors(ledgerErrors, `Ledger row ${idx + 2}: invalid or mismatched classId/date`)
+					continue
+				}
+				ledgerEntries.push({ item: parsed, rowNumber: idx + 2 })
+			}
+			logValidationResults('Ledger', ledgerBody.length, ledgerEntries.map((e) => e.item))
+
+			const studentIds = new Set(students.map((s) => s.id))
+			const sessionIds = new Set(sessions.map((s) => s.id))
+
+			const markReferentialRows = new Set<number>()
+			for (const entry of marks) {
+				let hasIssue = false
+				if (!studentIds.has(entry.studentId)) {
+					hasIssue = true
+					sampleErrors(markErrors, `Marks row ${entry.rowNumber}: unknown studentId ${entry.studentId}`)
+				}
+				if (!sessionIds.has(entry.sessionId)) {
+					hasIssue = true
+					sampleErrors(markErrors, `Marks row ${entry.rowNumber}: unknown sessionId ${entry.sessionId}`)
+				}
+				if (hasIssue) markReferentialRows.add(entry.rowNumber)
+			}
+
+			const ledgerReferentialRows = new Set<number>()
+			for (const entry of ledgerEntries) {
+				let hasIssue = false
+				if (!studentIds.has(entry.item.studentId)) {
+					hasIssue = true
+					sampleErrors(ledgerErrors, `Ledger row ${entry.rowNumber}: unknown studentId ${entry.item.studentId}`)
+				}
+				if (entry.item.sessionId && !sessionIds.has(entry.item.sessionId)) {
+					hasIssue = true
+					sampleErrors(ledgerErrors, `Ledger row ${entry.rowNumber}: unknown sessionId ${entry.item.sessionId}`)
+				}
+				if (hasIssue) ledgerReferentialRows.add(entry.rowNumber)
+			}
+
+			const duplicateStudents = findDuplicates(students.map((s) => s.id))
+			if (duplicateStudents.length) {
+				sampleErrors(studentErrors, `Duplicate student IDs: ${duplicateStudents.slice(0, 3).join(', ')}`)
+			}
+			const duplicateSessions = findDuplicates(sessions.map((s) => s.id))
+			if (duplicateSessions.length) {
+				sampleErrors(sessionErrors, `Duplicate session IDs: ${duplicateSessions.slice(0, 3).join(', ')}`)
+			}
+			const duplicateLedger = findDuplicates(ledgerEntries.map((e) => e.item.id))
+			if (duplicateLedger.length) {
+				sampleErrors(ledgerErrors, `Duplicate ledger IDs: ${duplicateLedger.slice(0, 3).join(', ')}`)
+			}
+			const duplicateMarks = findDuplicates(marks.map((m) => `${m.sessionId}::${m.studentId}`))
+			if (duplicateMarks.length) {
+				sampleErrors(markErrors, `Duplicate marks for session/student: ${duplicateMarks.slice(0, 3).join(', ')}`)
+			}
+
+			const studentInvalidTotal = invalidStudents + duplicateStudents.length
+			const sessionInvalidTotal = invalidSessions + duplicateSessions.length
+			const markInvalidTotal = invalidMarks + markReferentialRows.size + duplicateMarks.length
+			const ledgerInvalidTotal = invalidLedger + ledgerReferentialRows.size + duplicateLedger.length
+			const studentValidCount = Math.max(0, students.length - duplicateStudents.length)
+			const sessionValidCount = Math.max(0, sessions.length - duplicateSessions.length)
+			const markValidCount = Math.max(0, marks.length - duplicateMarks.length - markReferentialRows.size)
+			const ledgerValidCount = Math.max(0, ledgerEntries.length - duplicateLedger.length - ledgerReferentialRows.size)
+
+			report.validation = {
+				students: { total: studentsBody.length, valid: studentValidCount, invalid: studentInvalidTotal, sampleErrors: studentErrors },
+				sessions: { total: sessionsBody.length, valid: sessionValidCount, invalid: sessionInvalidTotal, sampleErrors: sessionErrors },
+				marks: { total: marksBody.length, valid: markValidCount, invalid: markInvalidTotal, sampleErrors: markErrors },
+				ledger: { total: ledgerBody.length, valid: ledgerValidCount, invalid: ledgerInvalidTotal, sampleErrors: ledgerErrors },
+			}
+
+			if (studentInvalidTotal || sessionInvalidTotal || markInvalidTotal || ledgerInvalidTotal) {
+				throw new Error(
+					`Import validation failed. ` +
+					`Students: ${studentInvalidTotal} invalid, ` +
+					`Sessions: ${sessionInvalidTotal} invalid, ` +
+					`Marks: ${markInvalidTotal} invalid, ` +
+					`Ledger: ${ledgerInvalidTotal} invalid.`,
+				)
+			}
+
+			const marksBySession = new Map<string, { [sid: string]: Mark }>()
+			for (const entry of marks) {
+				const obj = marksBySession.get(entry.sessionId) || {}
+				obj[entry.studentId] = entry.mark
+				marksBySession.set(entry.sessionId, obj)
+			}
+			const sessionsToAdd = sessions.map((s) => ({
+				...s,
+				marks: marksBySession.get(s.id) || {},
+			}))
+			const ledgerToAdd = ledgerEntries.map((e) => e.item)
+
 			// Begin destructive overwrite for this class
 			await db.transaction('rw', db.students, db.sessions, db.ledger, db.settings, async () => {
 				// Clear current class data
@@ -703,62 +1033,9 @@ export const useStore = create<Store>((set, get) => ({
 				const studentKeys = await db.students.where('classId').equals(classId).primaryKeys()
 				if (studentKeys.length) await db.students.bulkDelete(studentKeys as string[])
 
-				// Students
-				if (studentsBody.length) {
-					const validStudents = studentsBody
-						.map((r) => validateStudentRow(r, classId))
-						.filter((s): s is StudentEntity => s !== null)
-
-					logValidationResults('Students', studentsBody.length, validStudents)
-
-					if (validStudents.length) {
-						await db.students.bulkAdd(validStudents)
-					}
-				}
-
-				// Sessions and Marks
-				const marksBySession = new Map<string, { [sid: string]: Mark }>()
-				for (const r of marksBody) {
-					const sessionId = String(r[0] ?? '')
-					const studentId = String(r[1] ?? '')
-					const status = String(r[3] ?? 'present') as 'present' | 'absent'
-					const reason = (r[4] as any) || undefined
-					const markedAt = (r[5] as any) || undefined
-					const entry: Mark = { status, reason, markedAt }
-					const obj = marksBySession.get(sessionId) || {}
-					obj[studentId] = entry
-					marksBySession.set(sessionId, obj)
-				}
-
-				if (sessionsBody.length) {
-					await db.sessions.bulkAdd(
-						sessionsBody.map((r) => ({
-							id: String(r[0] ?? ''),
-							classId: String(r[1] ?? ''),
-							date: String(r[2] ?? ''),
-							createdAt: (r[3] as any) || undefined,
-							savedAt: (r[4] as any) || undefined,
-							picks: String(r[5] ?? '').split(',').filter(Boolean),
-							carryoverIds: String(r[7] ?? '').split(',').filter(Boolean),
-							marks: marksBySession.get(String(r[0] ?? '')) || {},
-						} as SessionEntity)),
-					)
-				}
-
-				// Ledger
-				if (ledgerBody.length) {
-					await db.ledger.bulkAdd(
-						ledgerBody.map((r) => ({
-							id: String(r[0] ?? ''),
-							classId: String(r[1] ?? ''),
-							studentId: String(r[2] ?? ''),
-							date: String(r[4] ?? ''),
-							sessionId: (r[5] as any) || undefined,
-							reason: (r[6] as any) || undefined,
-							notes: (r[7] as any) || undefined,
-						})),
-					)
-				}
+				if (students.length) await db.students.bulkAdd(students)
+				if (sessionsToAdd.length) await db.sessions.bulkAdd(sessionsToAdd)
+				if (ledgerToAdd.length) await db.ledger.bulkAdd(ledgerToAdd)
 
 				// Settings (only apply for this class if present)
 				if (settingsBody.length) {
@@ -776,28 +1053,36 @@ export const useStore = create<Store>((set, get) => ({
 					}
 				}
 			})
+			finalizeSyncReport(report, 'ok')
 			// eslint-disable-next-line no-alert
 			alert('Import completed and local data overwritten for this class.')
 		} catch (e) {
+			opError = (e as Error).message
+			finalizeSyncReport(report, 'failed', opError)
 			console.error('[Store]', 'Import failed', e)
 			// eslint-disable-next-line no-alert
 			alert(`Import failed: ${(e as Error).message}`)
 		} finally {
-			set({ isLoading: false })
+			writeSyncReport(report)
+			endOp(set, 'importSheets', opError)
 		}
 	},
 	async repairCurrentClassSpreadsheetIdentity(opts) {
 		const classId = get().selectedClassId
 		if (!classId) return
-		set({ isLoading: true, error: undefined })
+		beginOp(set, 'repairSheets')
+		const report = startSyncReport('repair', classId)
+		let opError: string | undefined
 		try {
 			const cls = await db.classes.get(classId)
 			const settings = await db.settings.get(classId)
 			const idRaw = settings?.spreadsheetId
 			if (!idRaw) throw new Error('No Spreadsheet ID configured for this class')
 			const spreadsheetId = normalizeAndValidateSpreadsheetId(idRaw)
+			report.spreadsheetId = spreadsheetId
 			await ensureCheckpointSheets(spreadsheetId)
 			const identity = await probeCheckpointSpreadsheetIdentity(spreadsheetId)
+			report.identity = identity
 			if (identity.multipleClassIds?.length) {
 				throw new Error(`Spreadsheet contains multiple class IDs: ${identity.multipleClassIds.join(', ')}`)
 			}
@@ -816,14 +1101,19 @@ export const useStore = create<Store>((set, get) => ({
 				CHECKPOINT_SETTINGS_SCHEMA_VERSION,
 				'',
 			]])
+			report.tabs = { Settings: { rowsWritten: 1 } }
+			finalizeSyncReport(report, 'ok')
 			if (!opts?.silent) {
 				alert('Spreadsheet identity metadata repaired.')
 			}
 		} catch (e) {
+			opError = (e as Error).message
+			finalizeSyncReport(report, 'failed', opError)
 			console.error('[Store]', 'Repair identity failed', e)
 			alert(`Repair failed: ${(e as Error).message}`)
 		} finally {
-			set({ isLoading: false })
+			writeSyncReport(report)
+			endOp(set, 'repairSheets', opError)
 		}
 	},
 }))
