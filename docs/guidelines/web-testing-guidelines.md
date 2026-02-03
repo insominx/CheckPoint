@@ -78,6 +78,25 @@ Good pattern:
 - business logic depends on an interface like `ApiClient`
 - tests provide a fake client with deterministic responses
 
+## Schema/Parsing Tests for External, User-Editable Data
+
+When your system reads data that humans can edit (spreadsheets, CSVs, “config tables”), parsing is often the real source of bugs.
+
+### Rules
+
+- **Test the parser with “dirty” fixtures**, not just perfect happy paths:
+  - duplicated header rows inside the body
+  - reordered columns
+  - missing columns
+  - extra columns
+  - mixed types (numbers-as-strings, empty cells)
+- **Add tests for identity/scoping mismatches** (wrong dataset/class/tenant) and verify the code fails closed before any destructive action.
+- **Prefer contract-style parsing** in code (header key → column index) and reflect that in tests (assert correct mapping even when column order changes).
+
+### Practical tip
+
+- Keep fixtures small but representative: a header row + 2–5 body rows covering the edge case.
+
 ## Control Time, Randomness, and Concurrency
 
 - **Freeze time** for tests involving dates/timeouts.

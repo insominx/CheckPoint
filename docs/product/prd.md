@@ -32,6 +32,11 @@ Non-Goals (v1): Full SIS integration, seating charts, tardy tracking, parental n
 6. I can export per-class absences to CSV (History page).
 7. I can optionally sync per-class data to Google Sheets and import from Sheets (Settings page; import overwrites local data for that class).
 
+Planned (not yet implemented):
+8. As a teacher, I can delete a class so it no longer appears in the Home dropdown.
+   - Deleting a class must cascade-delete all per-class local data: students, sessions, ledger, settings, and any saved draft session (`checkpoint_draft_session_<classId>`).
+   - Deleting a class does not delete any remote Google Sheet; it only removes local linkage/settings.
+
 ## 5) Selection Algorithm (current implementation)
 Let (scoped per class):
 - N = requested random size (default 5; per-class setting).
@@ -144,7 +149,7 @@ Settings:
 
 ## 14) Release Plan
 - v1.0 (current): Multi-class support; roster import (UUID generation if missing); carryovers uncapped; weighted random with never-seen boost and 2-session cooldown; present/absent with reasons; per-class CSV export; history correction tooling; Google Sheets sync/import.
-- v1.1 (next): Filters/search in History; roster export; better session cancellation/re-draw UX; improved offline status UI.
+- v1.1 (next): Delete class (cascade local data); filters/search in History; roster export; better session cancellation/re-draw UX; improved offline status UI.
 
 ## 15) Open Questions
 - None.
@@ -155,6 +160,9 @@ Settings:
 - Saving persists the session (including marks) to IndexedDB.
 - Exporting absences produces `absences_<classId>.csv` with `date,studentId,displayName,status,reason` for each absence.
 - IDs are generated for students missing IDs and are included in exports so identity is stable across sessions.
+
+## 16b) Acceptance Criteria (planned)
+- Given an existing class with students and/or history, when I delete the class, it is removed from the Home dropdown and all local per-class data is removed (students, sessions, ledger, settings, and any saved draft session in `localStorage`).
 
 ## 17) Tech Notes (current)
 - App location: `web/` (Vite SPA).

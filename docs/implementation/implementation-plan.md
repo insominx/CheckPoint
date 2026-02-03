@@ -4,7 +4,7 @@ This document started as a v1 plan. It has been updated to reflect what is imple
 
 ## Status Summary
 Implemented core v1. Remaining gaps are mostly UX polish and a few planned features:
-- Not implemented: normalized roster export; flexible column mapping UI; History filters/search; Playwright E2E.
+- Not implemented: delete class; normalized roster export; flexible column mapping UI; History filters/search; Playwright E2E.
 - Partially implemented: per-class CSV output "append" behavior (optional file handle exists, but current write behavior is not a true append and does not write headers).
 - Partially implemented: Session UI "absence count badge" (Roster shows derived counts; Session view does not currently display counts).
 

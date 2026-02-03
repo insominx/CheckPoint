@@ -50,6 +50,7 @@ interface Actions {
 	saveSession: () => Promise<void>
 	deleteSession: (sessionId: string) => Promise<void>
 	clearHistoryForClass: () => Promise<void>
+	deleteClass: (classId: string) => Promise<void>
 	exportCurrentClassToSheets: (opts?: { recreate?: boolean }) => Promise<void>
 	importCurrentClassFromSheets: () => Promise<void>
 	repairCurrentClassSpreadsheetIdentity: (opts?: { silent?: boolean }) => Promise<void>
@@ -343,6 +344,28 @@ export const useStore = create<Store>((set, get) => ({
 			if (ledgerIds.length) await db.ledger.bulkDelete(ledgerIds as string[])
 			// absenceCount is derived from ledger — clearing ledger clears counts
 		})
+	},
+
+	async deleteClass(classId) {
+		const selectedClassId = get().selectedClassId
+		const isSelected = selectedClassId === classId
+		const currentSession = get().currentSession
+		await db.transaction('rw', db.classes, db.students, db.sessions, db.ledger, db.settings, async () => {
+			await db.classes.delete(classId)
+			const studentKeys = await db.students.where('classId').equals(classId).primaryKeys()
+			if (studentKeys.length) await db.students.bulkDelete(studentKeys as string[])
+			const sessionKeys = await db.sessions.where('classId').equals(classId).primaryKeys()
+			if (sessionKeys.length) await db.sessions.bulkDelete(sessionKeys as string[])
+			const ledgerKeys = await db.ledger.where('classId').equals(classId).primaryKeys()
+			if (ledgerKeys.length) await db.ledger.bulkDelete(ledgerKeys as string[])
+			await db.settings.delete(classId)
+		})
+		localStorage.removeItem(`checkpoint_draft_session_${classId}`)
+		if (isSelected) {
+			set({ selectedClassId: undefined, currentSession: undefined, currentN: DEFAULT_N })
+		} else if (currentSession?.classId === classId) {
+			set({ currentSession: undefined })
+		}
 	},
 
 	async correctMark(sessionId, studentId, newStatus, reason) {

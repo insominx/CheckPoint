@@ -3,9 +3,10 @@ import { Link } from 'react-router-dom'
 import { useStore } from '../store'
 
 export default function Home() {
-	const { loadClasses, createClass, selectClass, selectedClassId } = useStore()
+	const { loadClasses, createClass, selectClass, deleteClass, selectedClassId } = useStore()
 	const [classes, setClasses] = useState<{ id: string; name: string }[]>([])
 	const [newClassName, setNewClassName] = useState('')
+	const [isDeleting, setIsDeleting] = useState(false)
 
 	useEffect(() => {
 		loadClasses().then(setClasses)
@@ -50,6 +51,30 @@ export default function Home() {
 						}}
 					>
 						Add Class
+					</button>
+					<button
+						style={{ marginLeft: 8 }}
+						disabled={!selectedClassId || isDeleting}
+						onClick={async () => {
+							if (!selectedClassId || isDeleting) return
+							const selected = classes.find((c) => c.id === selectedClassId)
+							const label = selected?.name || 'Unknown class'
+							const proceed = confirm(
+								`Delete class "${label}"?\n\nClass ID: ${selectedClassId}\nThis removes all students, sessions, history, and settings for this class.\nThis does not delete any Google Sheet.\n\nThis cannot be undone.`,
+							)
+							if (!proceed) return
+							try {
+								setIsDeleting(true)
+								await deleteClass(selectedClassId)
+								setClasses(await loadClasses())
+							} catch (e) {
+								alert((e as Error).message)
+							} finally {
+								setIsDeleting(false)
+							}
+						}}
+					>
+						{isDeleting ? 'Deleting...' : 'Delete Class'}
 					</button>
 				</div>
 			</div>

@@ -18,6 +18,7 @@ Active implementation documentation.
 | Document | Description |
 |----------|-------------|
 | [Implementation Plan](implementation/implementation-plan.md) | Current implementation status, phased plan, gaps remaining |
+| [Class Deletion](implementation/class-deletion.md) | Local-only hard delete semantics and verification steps |
 
 ## Guidelines
 
@@ -26,6 +27,7 @@ Development standards and best practices.
 | Document | Description |
 |----------|-------------|
 | [Web Testing Guidelines](guidelines/web-testing-guidelines.md) | Principles for writing reliable unit, integration, and E2E tests |
+| [External Sync Safety Guidelines](guidelines/external-sync-safety-guidelines.md) | Safety + schema/identity rules for syncing with user-editable external stores (e.g., spreadsheets) |
 
 ## Archive
 

@@ -23,6 +23,7 @@
 - Create and switch between multiple classes
 - Each class maintains its own roster, history, and settings
 - Attendance logic is scoped per class (carryovers do not cross classes)
+- Planned: delete a class (local cascade delete of per-class data so it no longer appears in the class chooser)
 
 ### 2. Smart Student Selection
 - **Carryovers**: Students marked absent in the most recent session automatically appear until marked present
