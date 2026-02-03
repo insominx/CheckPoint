@@ -34,6 +34,20 @@ interface UIState {
 	error?: string
 }
 
+type PickStudentsStatus = 'ok' | 'blocked' | 'no-class' | 'error'
+type RedrawStatus = PickStudentsStatus | 'needs-confirm'
+
+interface PickStudentsOptions {
+	allowExistingSession?: boolean
+	carryoverIdsOverride?: string[]
+	baseSession?: SessionEntity
+	resetMarks?: boolean
+}
+
+interface RedrawRandomOptions {
+	allowResetMarks?: boolean
+}
+
 interface Actions {
 	loadClasses: () => Promise<ClassEntity[]>
 	createClass: (name: string) => Promise<ClassEntity>
@@ -44,8 +58,8 @@ interface Actions {
 	getSessions: () => Promise<SessionEntity[]>
 	getClassSettings: () => Promise<{ cls: ClassEntity; settings: PerClassSettings } | null>
 	updateClassSettings: (updates: { defaultN?: number; neverSeenWeight?: number; cooldownWeight?: number; spreadsheetId?: string }) => Promise<void>
-	pickStudents: () => Promise<void>
-	redrawRandom: () => Promise<void>
+	pickStudents: (opts?: PickStudentsOptions) => Promise<PickStudentsStatus>
+	redrawRandom: (opts?: RedrawRandomOptions) => Promise<RedrawStatus>
 	markStudent: (studentId: string, mark: Mark) => void
 	saveSession: () => Promise<void>
 	deleteSession: (sessionId: string) => Promise<void>
@@ -67,6 +81,114 @@ type Store = UIState & Actions
 const DEFAULT_N = 5
 const DEFAULT_NEVER_SEEN_WEIGHT = 2.0
 const DEFAULT_COOLDOWN_WEIGHT = 0.5
+
+async function buildDraftSession({
+	classId,
+	currentN,
+	carryoverIdsOverride,
+	baseSession,
+	resetMarks,
+}: {
+	classId: string
+	currentN: number
+	carryoverIdsOverride?: string[]
+	baseSession?: SessionEntity
+	resetMarks?: boolean
+}): Promise<SessionEntity> {
+	const [students, sessionsRaw, ledger, settings] = await Promise.all([
+		db.students.where('classId').equals(classId).toArray(),
+		db.sessions.where('classId').equals(classId).toArray(),
+		db.ledger.where('classId').equals(classId).toArray(),
+		db.settings.get(classId),
+	])
+
+	// Sort sessions by date descending (most recent first)
+	const sessions = sessionsRaw.sort((a, b) => Date.parse(b.date) - Date.parse(a.date))
+
+	// Compute carryovers: students absent most recently and not yet present
+	const lastAbsentDateByStudent = new Map<string, string>()
+	for (const item of ledger) {
+		const prev = lastAbsentDateByStudent.get(item.studentId)
+		if (!prev || Date.parse(item.date) > Date.parse(prev)) {
+			lastAbsentDateByStudent.set(item.studentId, item.date)
+		}
+	}
+
+	const lastPresentDateByStudent = new Map<string, string>()
+	for (const s of sessions) {
+		for (const [sid, mark] of Object.entries(s.marks)) {
+			if (mark.status === 'present') {
+				const prev = lastPresentDateByStudent.get(sid)
+				if (!prev || Date.parse(s.date) > Date.parse(prev)) {
+					lastPresentDateByStudent.set(sid, s.date)
+				}
+			}
+		}
+	}
+
+	const carryovers = students.filter((st) => {
+		const lastAbsent = lastAbsentDateByStudent.get(st.id)
+		if (!lastAbsent) return false
+		const lastPresent = lastPresentDateByStudent.get(st.id)
+		if (!lastPresent) return true
+		return Date.parse(lastPresent) < Date.parse(lastAbsent)
+	})
+
+	const studentIds = new Set(students.map((s) => s.id))
+	const carryoverIdsInput = carryoverIdsOverride !== undefined ? carryoverIdsOverride : carryovers.map((s) => s.id)
+	const carryoverIds = Array.from(new Set(carryoverIdsInput.filter((id) => studentIds.has(id))))
+	const carryoverSet = new Set(carryoverIds)
+
+	// Eligible: never marked absent
+	const absentSet = new Set(Array.from(lastAbsentDateByStudent.keys()))
+	const eligible = students.filter((st) => !absentSet.has(st.id) && !carryoverSet.has(st.id))
+
+	// Determine weights
+	// never-seen boost: no marks in any session
+	const allMarkedIds = new Set<string>()
+	for (const s of sessions) {
+		for (const sid of Object.keys(s.marks)) allMarkedIds.add(sid)
+	}
+
+	// cooldown: if sampled or marked in each of last two sessions
+	const lastTwoSessions = sessions.slice(0, 2)
+	const involvedInLastTwo = new Set<string>()
+	if (lastTwoSessions.length === 2) {
+		const [s1, s2] = lastTwoSessions
+		const s1Set = new Set<string>([...s1.picks])
+		const s2Set = new Set<string>([...s2.picks])
+		for (const st of eligible) {
+			if (s1Set.has(st.id) && s2Set.has(st.id)) involvedInLastTwo.add(st.id)
+		}
+	}
+
+	const neverWeightRaw = settings?.neverSeenWeight
+	const cooldownWeightRaw = settings?.cooldownWeight
+	const neverWeight = Number.isFinite(neverWeightRaw) ? neverWeightRaw : DEFAULT_NEVER_SEEN_WEIGHT
+	const cooldownWeight = Number.isFinite(cooldownWeightRaw) ? cooldownWeightRaw : DEFAULT_COOLDOWN_WEIGHT
+	const weighted = eligible.map((st) => {
+		let w = allMarkedIds.has(st.id) ? 1.0 : neverWeight
+		if (involvedInLastTwo.has(st.id)) w *= cooldownWeight
+		return { item: st.id, weight: w }
+	})
+
+	const safeN = Number.isFinite(currentN) && currentN > 0 ? Math.floor(currentN) : DEFAULT_N
+	const randomIds = weightedSampleWithoutReplacement(weighted, safeN)
+	const picks = Array.from(new Set<string>([...carryoverIds, ...randomIds]))
+
+	const session: SessionEntity = {
+		id: baseSession?.id ?? uuidv4(),
+		classId,
+		date: baseSession?.date ?? new Date().toISOString(),
+		picks,
+		carryoverIds,
+		marks: resetMarks ? {} : baseSession?.marks ?? {},
+	}
+	if (baseSession?.createdAt) session.createdAt = baseSession.createdAt
+	if (baseSession?.savedAt) session.savedAt = baseSession.savedAt
+
+	return session
+}
 
 export const useStore = create<Store>((set, get) => ({
 	isLoading: false,
@@ -157,109 +279,46 @@ export const useStore = create<Store>((set, get) => ({
 			set({ currentN: updates.defaultN })
 		}
 	},
-	async pickStudents() {
-		// Guard against concurrent calls (race condition prevention)
-		if (!canStartOperation(get().isPickingStudents, !!get().currentSession)) return
-
+	async pickStudents(opts) {
 		const classId = get().selectedClassId
-		if (!classId) return
+		if (!classId) return 'no-class'
+
+		// Guard against concurrent calls (race condition prevention)
+		const allowExistingSession = opts?.allowExistingSession ?? false
+		const hasExistingResult = !!get().currentSession && !allowExistingSession
+		if (!canStartOperation(get().isPickingStudents, hasExistingResult)) return 'blocked'
+
 		set({ isPickingStudents: true, isLoading: true, error: undefined })
 		try {
-			const [students, sessionsRaw, ledger, settings] = await Promise.all([
-				db.students.where('classId').equals(classId).toArray(),
-				db.sessions.where('classId').equals(classId).toArray(),
-				db.ledger.where('classId').equals(classId).toArray(),
-				db.settings.get(classId),
-			])
-
-			// Sort sessions by date descending (most recent first)
-			const sessions = sessionsRaw.sort((a, b) => Date.parse(b.date) - Date.parse(a.date))
-
-			// Compute carryovers: students absent most recently and not yet present
-			const lastAbsentDateByStudent = new Map<string, string>()
-			for (const item of ledger) {
-				const prev = lastAbsentDateByStudent.get(item.studentId)
-				if (!prev || Date.parse(item.date) > Date.parse(prev)) {
-					lastAbsentDateByStudent.set(item.studentId, item.date)
-				}
-			}
-
-			const lastPresentDateByStudent = new Map<string, string>()
-			for (const s of sessions) {
-				for (const [sid, mark] of Object.entries(s.marks)) {
-					if (mark.status === 'present') {
-						const prev = lastPresentDateByStudent.get(sid)
-						if (!prev || Date.parse(s.date) > Date.parse(prev)) {
-							lastPresentDateByStudent.set(sid, s.date)
-						}
-					}
-				}
-			}
-
-			const carryovers = students.filter((st) => {
-				const lastAbsent = lastAbsentDateByStudent.get(st.id)
-				if (!lastAbsent) return false
-				const lastPresent = lastPresentDateByStudent.get(st.id)
-				if (!lastPresent) return true
-				return Date.parse(lastPresent) < Date.parse(lastAbsent)
-			})
-
-			// Eligible: never marked absent
-			const absentSet = new Set(Array.from(lastAbsentDateByStudent.keys()))
-			const eligible = students.filter((st) => !absentSet.has(st.id))
-
-			// Determine weights
-			// never-seen boost: no marks in any session
-			const allMarkedIds = new Set<string>()
-			for (const s of sessions) {
-				for (const sid of Object.keys(s.marks)) allMarkedIds.add(sid)
-			}
-
-			// cooldown: if sampled or marked in each of last two sessions
-			const lastTwoSessions = sessions.slice(0, 2)
-			const involvedInLastTwo = new Set<string>()
-			if (lastTwoSessions.length === 2) {
-				const [s1, s2] = lastTwoSessions
-				const s1Set = new Set<string>([...s1.picks])
-				const s2Set = new Set<string>([...s2.picks])
-				for (const st of eligible) {
-					if (s1Set.has(st.id) && s2Set.has(st.id)) involvedInLastTwo.add(st.id)
-				}
-			}
-
-			const neverWeight = settings?.neverSeenWeight ?? DEFAULT_NEVER_SEEN_WEIGHT
-			const cooldownWeight = settings?.cooldownWeight ?? DEFAULT_COOLDOWN_WEIGHT
-			const weighted = eligible.map((st) => {
-				let w = allMarkedIds.has(st.id) ? 1.0 : neverWeight
-				if (involvedInLastTwo.has(st.id)) w *= cooldownWeight
-				return { item: st.id, weight: w }
-			})
-
-			const n = get().currentN
-			const randomIds = weightedSampleWithoutReplacement(weighted, n)
-			const carryoverIds = carryovers.map((s) => s.id)
-			const picks = Array.from(new Set<string>([...carryoverIds, ...randomIds]))
-
-			const session: SessionEntity = {
-				id: uuidv4(),
+			const session = await buildDraftSession({
 				classId,
-				date: new Date().toISOString(),
-				picks,
-				carryoverIds,
-				marks: {},
-			}
+				currentN: get().currentN,
+				carryoverIdsOverride: opts?.carryoverIdsOverride,
+				baseSession: opts?.baseSession,
+				resetMarks: opts?.resetMarks,
+			})
 			set({ currentSession: session })
+			return 'ok'
 		} catch (e) {
 			set({ error: (e as Error).message })
+			return 'error'
 		} finally {
 			set({ isLoading: false, isPickingStudents: false })
 		}
 	},
-	async redrawRandom() {
-		const s = get().currentSession
-		if (!s) return get().pickStudents()
-		// Re-run pickStudents logic but keep carryovers
-		await get().pickStudents()
+	async redrawRandom(opts) {
+		if (get().isPickingStudents) return 'blocked'
+		const current = get().currentSession
+		if (!current) return get().pickStudents()
+		const hasMarks = Object.keys(current.marks || {}).length > 0
+		if (hasMarks && !opts?.allowResetMarks) return 'needs-confirm'
+
+		return get().pickStudents({
+			allowExistingSession: true,
+			carryoverIdsOverride: current.carryoverIds,
+			baseSession: current,
+			resetMarks: hasMarks,
+		})
 	},
 	markStudent(studentId, mark) {
 		const current = get().currentSession

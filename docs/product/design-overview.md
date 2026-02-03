@@ -23,10 +23,10 @@
 - Create and switch between multiple classes
 - Each class maintains its own roster, history, and settings
 - Attendance logic is scoped per class (carryovers do not cross classes)
-- Planned: delete a class (local cascade delete of per-class data so it no longer appears in the class chooser)
+- Delete a class (Home page) with a local cascade delete of per-class data (students, sessions, ledger, settings, and any draft session in `localStorage`)
 
 ### 2. Smart Student Selection
-- **Carryovers**: Students marked absent in the most recent session automatically appear until marked present
+- **Carryovers**: Students with an unresolved absence (most recent absence is more recent than their most recent Present mark, or never marked Present after an absence) automatically appear until cleared
 - **Random Sampling**: Weighted random selection of N students from those never marked absent
 - **Weighting Logic**:
   - Never-seen students get higher priority (weight 2.0)
@@ -36,7 +36,7 @@
 1. Select a class and click **Pick Students**
 2. Review the displayed students (carryovers + random picks)
 3. Mark each student as **Present** or **Absent** (with excused/unexcused reason)
-4. **Re-draw** regenerates the random portion if needed (carryovers stay)
+4. **Re-draw** regenerates the random portion (carryovers stay). If you have already marked any students, the app will confirm and **clear marks** before regenerating picks.
 5. **Save** finalizes the session and updates all records
 
 ### 4. Attendance Tracking
@@ -45,7 +45,7 @@
 - Present marks clear carryover status
 
 ### 5. Data Import/Export
-- CSV roster import with flexible column mapping
+- CSV roster import with header-based fields (missing columns/values are treated as empty)
 - Auto-generates stable UUIDs for students missing IDs
 - Per-class absence CSV export for external record-keeping
 - Optional Google Sheets integration for cloud backup
@@ -128,7 +128,7 @@
 
 1. **Offline-First**: Entire app works without internet; all data in browser IndexedDB
 2. **Local-Only by Default**: No authentication, no server—privacy preserved
-3. **Deterministic Selection**: Weighted random with seedable RNG for testability
+3. **Testable Selection**: Weighted random uses a seedable RNG (the app does not set a fixed seed in normal usage)
 4. **Append-Only Ledger**: Absences logged immutably for reliable history
 5. **Desktop-First, Mobile-Friendly**: Optimized for laptop use, responsive design
 6. **Ledger as Single Source of Truth**: Absence counts derived from ledger, not cached

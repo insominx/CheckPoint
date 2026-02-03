@@ -31,24 +31,22 @@ Non-Goals (v1): Full SIS integration, seating charts, tardy tracking, parental n
 5. I can configure N and sampling weights per class (Settings page).
 6. I can export per-class absences to CSV (History page).
 7. I can optionally sync per-class data to Google Sheets and import from Sheets (Settings page; import overwrites local data for that class).
-
-Planned (not yet implemented):
 8. As a teacher, I can delete a class so it no longer appears in the Home dropdown.
-   - Deleting a class must cascade-delete all per-class local data: students, sessions, ledger, settings, and any saved draft session (`checkpoint_draft_session_<classId>`).
+   - Deleting a class cascade-deletes all per-class local data: students, sessions, ledger, settings, and any saved draft session (`checkpoint_draft_session_<classId>`).
    - Deleting a class does not delete any remote Google Sheet; it only removes local linkage/settings.
 
 ## 5) Selection Algorithm (current implementation)
 Let (scoped per class):
 - N = requested random size (default 5; per-class setting).
-- Carryovers = students currently carryover-flagged without a later Present.
+- Carryovers = students with an unresolved absence: their most recent ledger absence is more recent than their most recent Present mark (or they have never been marked Present after an absence).
 - Eligible = students never marked absent.
 - DisplaySet = students shown this session.
 
 Steps at session start:
 1. Always include all Carryovers in DisplaySet (no cap).
 2. Draw a random sample of size N from Eligible using weighted sampling without replacement:
-   - Never-seen boost: if a student has no saved marks in any prior session, they get `neverSeenWeight` (default 2.0); otherwise weight 1.0.
-   - Cooldown bias: if a student appears in the pick set for each of the last two saved sessions, their weight is multiplied by `cooldownWeight` (default 0.5).
+   - Never-seen boost: if a student has never been marked (no entry in any prior session's `marks`), they get `neverSeenWeight` (default 2.0); otherwise weight 1.0.
+   - Cooldown bias: if a student appears in `picks` for each of the last two saved sessions, their weight is multiplied by `cooldownWeight` (default 0.5).
 3. DisplaySet = Carryovers union RandomDraw (may exceed N if there are carryovers).
 
 Notes:
@@ -63,10 +61,10 @@ State updates on Save:
 The implementation uses IndexedDB via Dexie with entities defined in `web/src/types.ts`:
 
 - `ClassEntity`: `{ id: string, name: string, defaultN: number, csvPath?: string }`
-- `StudentEntity`: `{ id: string, classId: string, displayName: string, firstName?, lastName?, loginId?, sisId?, notes? }`
+- `StudentEntity`: `{ id: string, classId: string, displayName: string, firstName?, lastName?, externalId?, loginId?, sisId?, notes? }`
 - `SessionEntity`: `{ id: string, classId: string, date: ISODateTime, createdAt?, savedAt?, picks: string[], carryoverIds?: string[], marks: Record<string, { status: 'present'|'absent', reason?, markedAt? }> }`
 - `AbsenceLedgerItem`: `{ id: string, classId: string, studentId: string, date: ISODateTime, sessionId?, reason?, notes? }`
-- `PerClassSettings`: `{ classId: string, defaultN: number, neverSeenWeight: number, cooldownWeight: number, csvFileHandle?, spreadsheetId?, lastExportedAt? }`
+- `PerClassSettings`: `{ classId: string, defaultN: number, neverSeenWeight: number, cooldownWeight: number, csvFileHandle?: unknown, spreadsheetId?, lastExportedAt? }`
 
 Derived concepts:
 - Carryovers are derived from the ledger and the most recent Present marks (not stored as a separate index).
@@ -76,7 +74,7 @@ Derived concepts:
 - Default: Browser IndexedDB per class (Dexie DB name is `CheckPointDB`).
 - Draft sessions: The current (unsaved) session is auto-saved to `localStorage` under `checkpoint_draft_session_<classId>`.
 - CSV export (manual): History page exports a full per-class absence ledger to `absences_<classId>.csv` with columns `date,studentId,displayName,status,reason` where `status` is always `ABSENT`.
-- CSV output (optional): Settings lets the user select an output CSV file via the File System Access API; on Save, the app attempts to write absent rows for that session to that file.
+- CSV output (optional): Settings lets the user select an output CSV file via the File System Access API; on Save, the app attempts to append absent rows for that session to that file.
 - Google Sheets sync (optional): Settings can export/import per-class data to a spreadsheet using Google Identity Services and the Sheets/Drive APIs.
 
 ## 8) Roster Ingestion (current implementation)
@@ -105,11 +103,13 @@ b78d4133-6b02-4883-af47-1459f3aa7d70,Athena,Burciaga,Athena Burciaga,burc2273,bu
 ## 9) UX Flows (current implementation)
 Home:
 - Choose Class (dropdown), optionally create a new class, then press Pick Students to start a session.
+- Delete Class: removes the class and all its local data (students, sessions, ledger, settings, and any draft session in `localStorage`).
 
 Session:
 - Banner: "Carryovers included automatically (not capped)."
 - Controls: progress count, Re-draw button, Save button.
 - Save is disabled until all picked students are marked.
+- Re-draw regenerates the random portion (carryovers stay). If any students are already marked, the app confirms and clears marks before re-drawing.
 - Student cards: name, Present/Absent toggles, reason dropdown (enabled when Absent), carryover highlight.
 
 History:
@@ -126,7 +126,7 @@ Roster:
 Settings:
 - Default N and sampling weights (`neverSeenWeight`, `cooldownWeight`).
 - Choose CSV Output (File System Access API).
-- Google Sheets connect + create spreadsheet + sync/import.
+- Google Sheets connect + create spreadsheet + sync/import + metadata repair (identity/timestamp row in `Settings` tab).
 
 ## 10) Edge Cases
 - Many carryovers: all appear each session until cleared; random draw is still size N and added on top.
@@ -149,7 +149,7 @@ Settings:
 
 ## 14) Release Plan
 - v1.0 (current): Multi-class support; roster import (UUID generation if missing); carryovers uncapped; weighted random with never-seen boost and 2-session cooldown; present/absent with reasons; per-class CSV export; history correction tooling; Google Sheets sync/import.
-- v1.1 (next): Delete class (cascade local data); filters/search in History; roster export; better session cancellation/re-draw UX; improved offline status UI.
+- v1.1 (next): Filters/search in History; roster export; better session cancellation/re-draw UX; improved offline status UI.
 
 ## 15) Open Questions
 - None.
@@ -160,9 +160,6 @@ Settings:
 - Saving persists the session (including marks) to IndexedDB.
 - Exporting absences produces `absences_<classId>.csv` with `date,studentId,displayName,status,reason` for each absence.
 - IDs are generated for students missing IDs and are included in exports so identity is stable across sessions.
-
-## 16b) Acceptance Criteria (planned)
-- Given an existing class with students and/or history, when I delete the class, it is removed from the Home dropdown and all local per-class data is removed (students, sessions, ledger, settings, and any saved draft session in `localStorage`).
 
 ## 17) Tech Notes (current)
 - App location: `web/` (Vite SPA).

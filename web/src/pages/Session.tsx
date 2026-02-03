@@ -5,9 +5,10 @@ import type { AbsenceReason } from '../types'
 
 export default function Session() {
 	const navigate = useNavigate()
-	const { selectedClassId, currentSession, pickStudents, redrawRandom, markStudent, saveSession, currentN, isLoading, getStudents } = useStore()
+	const { selectedClassId, currentSession, pickStudents, redrawRandom, markStudent, saveSession, currentN, isLoading, isPickingStudents, getStudents } = useStore()
 	const [studentNamesById, setStudentNamesById] = useState<Record<string, string>>({})
 	const [reasonById, setReasonById] = useState<Record<string, AbsenceReason>>({})
+	const [redrawMessage, setRedrawMessage] = useState<string | null>(null)
 
 	useEffect(() => {
 		if (!selectedClassId) navigate('/')
@@ -27,11 +28,38 @@ export default function Session() {
 		})()
 	}, [selectedClassId, getStudents])
 
+	const handleRedraw = async () => {
+		if (!currentSession) return
+		setRedrawMessage(null)
+		const hasMarks = Object.keys(currentSession.marks || {}).length > 0
+		let allowResetMarks = false
+		if (hasMarks) {
+			// eslint-disable-next-line no-alert
+			const confirmed = confirm('Re-draw will clear any existing marks for this session. Continue?')
+			if (!confirmed) return
+			allowResetMarks = true
+		}
+		const result = await redrawRandom({ allowResetMarks })
+		if (result === 'ok') {
+			if (allowResetMarks) setReasonById({})
+			return
+		}
+		if (result === 'blocked') {
+			setRedrawMessage('Re-draw is already in progress.')
+			return
+		}
+		if (result === 'needs-confirm') {
+			setRedrawMessage('Re-draw requires confirmation to reset marks.')
+			return
+		}
+		setRedrawMessage('Re-draw failed. Please try again.')
+	}
+
 	if (!currentSession) {
 		return (
 			<div style={{ padding: 16 }}>
 				<h2>Session</h2>
-				<button onClick={() => pickStudents()} disabled={!selectedClassId || isLoading}>
+				<button onClick={() => pickStudents()} disabled={!selectedClassId || isLoading || isPickingStudents}>
 					Generate Picks (N={currentN})
 				</button>
 			</div>
@@ -47,9 +75,9 @@ export default function Session() {
 			<div className="banner">Carryovers included automatically (not capped).</div>
 			<div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
 				<span style={{ opacity: 0.8 }}>{markedCount}/{currentSession.picks.length} marked</span>
-				<button onClick={() => redrawRandom()} disabled={isLoading}>Re-draw</button>
+				<button onClick={handleRedraw} disabled={isLoading || isPickingStudents}>Re-draw</button>
 				<button
-					disabled={!allMarked || isLoading}
+					disabled={!allMarked || isLoading || isPickingStudents}
 					onClick={async () => {
 						await saveSession()
 						navigate('/')
@@ -58,6 +86,7 @@ export default function Session() {
 					Save
 				</button>
 			</div>
+			{redrawMessage ? <div style={{ marginTop: 6, fontSize: 12, color: '#fbbf24' }}>{redrawMessage}</div> : null}
 			<div className="cards">
 				{currentSession.picks.map((sid) => (
 					<div key={sid} className={`card ${currentSession.carryoverIds?.includes(sid) ? 'carryover' : ''}`}>

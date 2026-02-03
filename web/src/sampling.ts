@@ -19,12 +19,12 @@ export function weightedSampleWithoutReplacement<T>(
 	const results: T[] = []
 	const k = Math.min(sampleSize, pool.length)
 	for (let i = 0; i < k; i++) {
-		const totalWeight = pool.reduce((acc, it) => acc + Math.max(it.weight, 0), 0)
+		const totalWeight = pool.reduce((acc, it) => acc + (Number.isFinite(it.weight) ? Math.max(it.weight, 0) : 0), 0)
 		if (totalWeight <= 0) break
 		let r = rng.quick() * totalWeight
 		let chosenIndex = 0
 		for (let j = 0; j < pool.length; j++) {
-			const w = Math.max(pool[j].weight, 0)
+			const w = Number.isFinite(pool[j].weight) ? Math.max(pool[j].weight, 0) : 0
 			if (r < w) {
 				chosenIndex = j
 				break

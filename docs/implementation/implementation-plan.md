@@ -56,7 +56,12 @@ Derived behavior:
    - Never-seen boost: if a student has no marks in any saved session, weight = `neverSeenWeight` (default 2.0); otherwise 1.0.
    - Cooldown: if a student appears in the pick set for each of the last two saved sessions, weight *= `cooldownWeight` (default 0.5).
 4. Random draw: weighted, without replacement, size N from Eligible. DisplaySet = Carryovers union RandomDraw.
-5. Re-draw regenerates the random portion (by regenerating the session) until Save.
+5. Re-draw regenerates the random portion until Save.
+   - If any students are already marked in the draft, the app confirms and clears marks before re-drawing.
+   - Re-draw does not change the weighting inputs (weights are derived from saved sessions/ledger + per-class settings).
+
+Notes:
+- Sampling weights must be finite numbers. If settings contain invalid values (e.g., `NaN` from a bad import), the sampler treats those weights as 0.
 
 ## Phased Plan (what’s done vs. pending)
 - Phase 1 - Setup & Data Layer (Done)

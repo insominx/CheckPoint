@@ -36,8 +36,8 @@ The CheckPoint codebase underwent a comprehensive quality review. All high-prior
 
 | Issue | Resolution |
 |-------|------------|
-| **Direct DB Access (Session/History/Settings)** | Added `getSessions()`, `getClassSettings()`, `updateClassSettings()` store actions. |
-| **Direct DB Mutation (Roster)** | Roster page now read-only; uses store action for counts. |
+| **Direct DB Access (Session/History/Settings)** | Added `getSessions()`, `getClassSettings()`, `updateClassSettings()` store actions so core flows go through `store.ts` (some UI helpers still use `db` directly, e.g. History export and the CSV file picker). |
+| **Direct DB Mutation (Roster)** | Roster view reads via store (`getStudents()` + `getAbsenceCount()`); roster import is the only place that writes student rows directly. |
 | **Mixed Responsibilities** | Extracted pure logic into `attendance.ts`, `sync.ts`, `validation.ts` for testability. |
 
 ### Safety Mechanisms (P0-P2)
