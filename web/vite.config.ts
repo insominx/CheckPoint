@@ -1,27 +1,31 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
 // https://vite.dev/config/
 export default defineConfig({
+	test: {
+		include: ['src/**/*.test.ts'],
+	},
 	plugins: [
 		react(),
 		VitePWA({
 			registerType: 'autoUpdate',
-			includeAssets: ['favicon.svg', 'robots.txt', 'apple-touch-icon.png'],
 			manifest: {
 				name: 'CheckPoint',
 				short_name: 'CheckPoint',
-				description: 'Attendance spot-check app',
-				theme_color: '#ffffff',
+				description: 'Attendance spot-check app for teachers',
+				theme_color: '#0b1017',
+				background_color: '#0b1017',
 				icons: [
 					{
-						src: 'pwa-192x192.png',
+						src: 'logo-192.png',
 						sizes: '192x192',
 						type: 'image/png',
 					},
 					{
-						src: 'pwa-512x512.png',
+						src: 'logo-512.png',
 						sizes: '512x512',
 						type: 'image/png',
 					},

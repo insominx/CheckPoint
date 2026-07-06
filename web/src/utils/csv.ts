@@ -61,7 +61,6 @@ export function toStudentEntities(classId: string, rows: RosterRow[], uuidv4: ()
 				displayName,
 				loginId: r.loginId,
 				sisId: r.sisId,
-				absenceCount: 0,
 			}
 		})
 }

@@ -1,6 +1,6 @@
 import Dexie from 'dexie'
 import type { Table } from 'dexie'
-import type { AbsenceLedgerItem, ClassEntity, PerClassSettings, SessionEntity, StudentEntity } from './types'
+import type { AbsenceLedgerItem, ClassEntity, PerClassSettings, SessionEntity, StudentEntity } from '../types'
 
 export class CheckPointDB extends Dexie {
 	classes!: Table<ClassEntity, string>
