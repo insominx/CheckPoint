@@ -17,7 +17,8 @@ Active implementation documentation.
 
 | Document | Description |
 |----------|-------------|
-| [Implementation Plan](implementation/implementation-plan.md) | Current implementation status, phased plan, gaps remaining |
+| [July 2026 Revamp](implementation/revamp-2026-07.md) | **Current architecture and sync model** — supersedes older docs where they conflict |
+| [Implementation Plan](implementation/implementation-plan.md) | v1 implementation status (pre-revamp; partially outdated) |
 | [Class Deletion](implementation/class-deletion.md) | Local-only hard delete semantics and verification steps |
 
 ## Guidelines
@@ -27,7 +28,6 @@ Development standards and best practices.
 | Document | Description |
 |----------|-------------|
 | [Web Testing Guidelines](guidelines/web-testing-guidelines.md) | Principles for writing reliable unit, integration, and E2E tests |
-| [External Sync Safety Guidelines](guidelines/external-sync-safety-guidelines.md) | Safety + schema/identity rules for syncing with user-editable external stores (e.g., spreadsheets) |
 
 ## Archive
 
@@ -36,6 +36,7 @@ Historical documentation from completed work.
 | Document | Description |
 |----------|-------------|
 | [v1 Code Quality Improvements](archive/v1-code-quality-improvements.md) | Consolidated audit and fixes from January 2026 |
+| [External Sync Safety Guidelines](archive/external-sync-safety-guidelines.md) | Identity/repair rules for the old bidirectional sync (removed in the July 2026 revamp) |
 
 ## Scratch
 

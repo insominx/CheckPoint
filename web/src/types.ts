@@ -3,7 +3,6 @@ export type AbsenceReason = 'excused' | 'unexcused'
 export interface ClassEntity {
 	id: string
 	name: string
-	csvPath?: string
 	defaultN: number
 }
 
@@ -17,8 +16,6 @@ export interface StudentEntity {
 	loginId?: string
 	sisId?: string
 	notes?: string
-	/** @deprecated Use getAbsenceCount() from store - this is derived from ledger */
-	absenceCount?: number
 }
 
 export type AttendanceStatus = 'present' | 'absent'
@@ -67,9 +64,9 @@ export interface PerClassSettings {
 	defaultN: number
 	neverSeenWeight: number
 	cooldownWeight: number
-	csvFileHandle?: unknown
 	spreadsheetId?: string
-	lastExportedAt?: string // ISO timestamp for optimistic locking on Sheets
+	/** ISO timestamp of the most recent export to Google Sheets (informational). */
+	lastExportedAt?: string
 }
 
 

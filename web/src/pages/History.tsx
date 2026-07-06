@@ -1,14 +1,17 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { useStore } from '../store'
-import { db } from '../db' // Needed for CSV export
+import { useConfirm } from '../components/Dialog'
+import { useToast } from '../components/Toast'
+import * as repo from '../data/repository'
 import { exportAbsencesCsv } from '../utils/csv'
-import type { SessionEntity, AbsenceReason } from '../types'
+import type { AbsenceReason, SessionEntity } from '../types'
 
 interface SessionRow {
 	id: string
 	date: string
 	picks: number
-	absents: number
+	present: number
+	absent: number
 }
 
 interface ExpandedDetails {
@@ -17,196 +20,227 @@ interface ExpandedDetails {
 }
 
 export default function History() {
-	const { selectedClassId, getSessions, getSessionDetails, correctMark, deleteSession, clearHistoryForClass } = useStore()
+	const { ready, selectedClassId, selectedClass } = useStore()
+	const confirm = useConfirm()
+	const toast = useToast()
 	const [rows, setRows] = useState<SessionRow[]>([])
 	const [expandedId, setExpandedId] = useState<string | null>(null)
-	const [expandedDetails, setExpandedDetails] = useState<ExpandedDetails | null>(null)
+	const [expanded, setExpanded] = useState<ExpandedDetails | null>(null)
 	const [correcting, setCorrecting] = useState(false)
 
-	async function loadSessions() {
+	const load = useCallback(async () => {
 		if (!selectedClassId) return
-		const sessions = await getSessions()
+		const sessions = await repo.getSessions(selectedClassId)
 		setRows(
-			sessions.map((s) => ({
-				id: s.id,
-				date: s.date,
-				picks: s.picks.length,
-				absents: Object.values(s.marks).filter((m) => m.status === 'absent').length,
-			})),
+			sessions.map((s) => {
+				const marks = Object.values(s.marks)
+				return {
+					id: s.id,
+					date: s.date,
+					picks: s.picks.length,
+					present: marks.filter((m) => m.status === 'present').length,
+					absent: marks.filter((m) => m.status === 'absent').length,
+				}
+			}),
+		)
+	}, [selectedClassId])
+
+	useEffect(() => {
+		load()
+		setExpandedId(null)
+		setExpanded(null)
+	}, [load])
+
+	if (!ready) return null
+
+	if (!selectedClassId) {
+		return (
+			<div className="page">
+				<div className="empty"><h3>No class selected</h3><p>Pick a class in the sidebar first.</p></div>
+			</div>
 		)
 	}
 
-	useEffect(() => {
-		loadSessions()
-		setExpandedId(null)
-		setExpandedDetails(null)
-	}, [selectedClassId])
-
-	async function handleExpand(sessionId: string) {
-		if (expandedId === sessionId) {
-			setExpandedId(null)
-			setExpandedDetails(null)
-			return
-		}
-		const details = await getSessionDetails(sessionId)
-		if (details) {
-			setExpandedId(sessionId)
-			setExpandedDetails(details)
-		}
+	const loadDetails = async (sessionId: string) => {
+		const [session, students] = await Promise.all([
+			repo.getSession(sessionId),
+			repo.getStudents(selectedClassId),
+		])
+		if (!session) return
+		const studentNames: Record<string, string> = {}
+		for (const s of students) studentNames[s.id] = s.displayName
+		setExpanded({ session, studentNames })
 	}
 
-	async function handleCorrect(studentId: string, newStatus: 'present' | 'absent', reason?: AbsenceReason) {
+	const handleExpand = async (sessionId: string) => {
+		if (expandedId === sessionId) {
+			setExpandedId(null)
+			setExpanded(null)
+			return
+		}
+		setExpandedId(sessionId)
+		await loadDetails(sessionId)
+	}
+
+	const handleCorrect = async (studentId: string, newStatus: 'present' | 'absent', reason?: AbsenceReason) => {
 		if (!expandedId) return
 		setCorrecting(true)
 		try {
-			await correctMark(expandedId, studentId, newStatus, reason)
-			// Refresh both the list and expanded details
-			await loadSessions()
-			const details = await getSessionDetails(expandedId)
-			if (details) setExpandedDetails(details)
+			await repo.correctMark(selectedClassId, expandedId, studentId, newStatus, reason)
+			await Promise.all([load(), loadDetails(expandedId)])
 		} finally {
 			setCorrecting(false)
 		}
 	}
 
+	const handleExportCsv = async () => {
+		const [items, students] = await Promise.all([
+			repo.getLedger(selectedClassId),
+			repo.getStudents(selectedClassId),
+		])
+		if (!items.length) {
+			toast.info('No absences recorded yet — nothing to export.')
+			return
+		}
+		exportAbsencesCsv(selectedClassId, items, new Map(students.map((s) => [s.id, s.displayName])))
+	}
+
+	const handleClearAll = async () => {
+		const proceed = await confirm({
+			title: 'Clear all history?',
+			message: `Every session and absence record for "${selectedClass?.name}" will be deleted. The roster stays.\n\nThis cannot be undone.`,
+			confirmLabel: 'Clear history',
+			danger: true,
+		})
+		if (!proceed) return
+		await repo.clearHistoryForClass(selectedClassId)
+		await load()
+		setExpandedId(null)
+		setExpanded(null)
+		toast.success('History cleared.')
+	}
+
+	const handleDeleteSession = async (sessionId: string, date: string) => {
+		const proceed = await confirm({
+			title: 'Delete this session?',
+			message: `The session from ${new Date(date).toLocaleString()} and its absence records will be removed.`,
+			confirmLabel: 'Delete session',
+			danger: true,
+		})
+		if (!proceed) return
+		await repo.deleteSessionCascade(selectedClassId, sessionId)
+		await load()
+		if (expandedId === sessionId) {
+			setExpandedId(null)
+			setExpanded(null)
+		}
+	}
+
 	return (
 		<div className="page">
-			<h2>History</h2>
-			<div style={{ display: 'flex', gap: 8 }}>
-				<button
-					onClick={async () => {
-						if (!selectedClassId) return
-						const [items, classStudents] = await Promise.all([
-							db.ledger.where('classId').equals(selectedClassId).toArray(),
-							db.students.where('classId').equals(selectedClassId).toArray(),
-						])
-						const nameById = new Map<string, string>(classStudents.map((s) => [s.id, s.displayName]))
-						exportAbsencesCsv(selectedClassId, items, nameById)
-					}}
-					disabled={!selectedClassId}
-				>
-					Export Absences CSV
-				</button>
-				<button
-					style={{ color: '#ef4444', borderColor: '#7f1d1d' }}
-					onClick={async () => {
-						if (!selectedClassId) return
-						if (!confirm('Clear all sessions and absences for this class? This cannot be undone.')) return
-						await clearHistoryForClass()
-						await loadSessions()
-						setExpandedId(null)
-						setExpandedDetails(null)
-					}}
-					disabled={!selectedClassId}
-				>
-					Clear All History
-				</button>
+			<div className="page-header">
+				<div>
+					<h1>History</h1>
+					<p className="sub">{selectedClass?.name} — {rows.length} saved session{rows.length === 1 ? '' : 's'}</p>
+				</div>
+				<div className="page-actions">
+					<button className="btn" onClick={handleExportCsv}>Export absences CSV</button>
+					<button className="btn btn-danger" onClick={handleClearAll} disabled={!rows.length}>Clear all history</button>
+				</div>
 			</div>
-			<table>
-				<thead>
-					<tr>
-						<th></th>
-						<th>Date</th>
-						<th>Picks</th>
-						<th>Absents</th>
-						<th>Actions</th>
-					</tr>
-				</thead>
-				<tbody>
-					{rows.map((r) => (
-						<>
-							<tr key={r.id} onClick={() => handleExpand(r.id)} style={{ cursor: 'pointer' }}>
-								<td style={{ width: 24 }}>{expandedId === r.id ? '▼' : '▶'}</td>
-								<td>{new Date(r.date).toLocaleString()}</td>
-								<td>{r.picks}</td>
-								<td>{r.absents}</td>
-								<td>
-									<button
-										style={{ color: '#ef4444', borderColor: '#7f1d1d' }}
-										onClick={async (e) => {
-											e.stopPropagation()
-											if (!selectedClassId) return
-											if (!confirm('Delete this session and its absences?')) return
-											await deleteSession(r.id)
-											await loadSessions()
-											if (expandedId === r.id) {
-												setExpandedId(null)
-												setExpandedDetails(null)
-											}
-										}}
-									>
-										Delete
-									</button>
-								</td>
+
+			{rows.length === 0 ? (
+				<div className="empty">
+					<h3>No sessions yet</h3>
+					<p>Saved attendance checks show up here. Expand a session to review or correct marks.</p>
+				</div>
+			) : (
+				<div className="table-wrap">
+					<table className="table">
+						<thead>
+							<tr>
+								<th style={{ width: 28 }} />
+								<th>Date</th>
+								<th className="num">Checked</th>
+								<th className="num">Present</th>
+								<th className="num">Absent</th>
+								<th style={{ width: 100 }} />
 							</tr>
-							{expandedId === r.id && expandedDetails && (
-								<tr key={`${r.id}-details`}>
-									<td colSpan={5} style={{ background: 'rgba(255,255,255,0.05)', padding: 12 }}>
-										<div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Session Details — Click to correct marks</div>
-										<div className="cards" style={{ gap: 8, display: 'flex', flexWrap: 'wrap' }}>
-											{expandedDetails.session.picks.map((sid) => {
-												const mark = expandedDetails.session.marks[sid]
-												const isAbsent = mark?.status === 'absent'
-												const isCarryover = expandedDetails.session.carryoverIds?.includes(sid)
-												return (
-													<div
-														key={sid}
-														className="card"
-														style={{
-															minWidth: 180,
-															padding: 12,
-															border: isCarryover ? '2px solid #fbbf24' : undefined,
-														}}
-													>
-														<div style={{ fontWeight: 600, marginBottom: 4 }}>
-															{expandedDetails.studentNames[sid] ?? sid}
-														</div>
-														{isCarryover && <div style={{ fontSize: 11, color: '#fbbf24', marginBottom: 4 }}>Carryover</div>}
-														<div style={{ fontSize: 12, marginBottom: 8 }}>
-															Status: <strong style={{ color: isAbsent ? '#ef4444' : '#22c55e' }}>{mark?.status ?? 'unmarked'}</strong>
-															{isAbsent && mark?.reason && <span> ({mark.reason})</span>}
-														</div>
-														<div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-															{isAbsent ? (
-																<button
-																	disabled={correcting}
-																	onClick={() => handleCorrect(sid, 'present')}
-																	style={{ background: '#166534', borderColor: '#166534' }}
-																>
-																	→ Present
-																</button>
-															) : (
-																<>
-																	<button
-																		disabled={correcting}
-																		onClick={() => handleCorrect(sid, 'absent', 'unexcused')}
-																		style={{ background: '#991b1b', borderColor: '#991b1b' }}
-																	>
-																		→ Absent
-																	</button>
-																</>
-															)}
-															{isAbsent && (
-																<button
-																	disabled={correcting}
-																	onClick={() => handleCorrect(sid, 'absent', mark?.reason === 'excused' ? 'unexcused' : 'excused')}
-																	style={{ fontSize: 11 }}
-																>
-																	{mark?.reason === 'excused' ? 'Set Unexcused' : 'Set Excused'}
-																</button>
-															)}
-														</div>
-													</div>
-												)
-											})}
-										</div>
-									</td>
-								</tr>
-							)}
-						</>
-					))}
-				</tbody>
-			</table>
+						</thead>
+						<tbody>
+							{rows.map((r) => (
+								<Fragment key={r.id}>
+									<tr className="clickable" onClick={() => handleExpand(r.id)}>
+										<td className="muted">{expandedId === r.id ? '▾' : '▸'}</td>
+										<td>{new Date(r.date).toLocaleString()}</td>
+										<td className="num">{r.picks}</td>
+										<td className="num">{r.present}</td>
+										<td className="num">{r.absent > 0 ? <span className="badge badge-danger">{r.absent}</span> : 0}</td>
+										<td style={{ textAlign: 'right' }}>
+											<button
+												className="btn btn-sm btn-ghost"
+												onClick={(e) => {
+													e.stopPropagation()
+													handleDeleteSession(r.id, r.date)
+												}}
+											>
+												Delete
+											</button>
+										</td>
+									</tr>
+									{expandedId === r.id && expanded && (
+										<tr className="expand-row">
+											<td colSpan={6}>
+												<p className="faint" style={{ marginBottom: 10 }}>Click a status to correct it — the absence ledger stays in sync.</p>
+												<div className="cards">
+													{expanded.session.picks.map((sid) => {
+														const mark = expanded.session.marks[sid]
+														const isAbsent = mark?.status === 'absent'
+														const isCarryover = expanded.session.carryoverIds?.includes(sid)
+														return (
+															<div key={sid} className={`student-card ${isCarryover ? 'carryover' : ''}`}>
+																<div className="name">
+																	<span>{expanded.studentNames[sid] ?? sid}</span>
+																	{isCarryover && <span className="badge badge-warn">recheck</span>}
+																</div>
+																<div className="meta">
+																	{mark
+																		? <>Marked <strong style={{ color: isAbsent ? 'var(--danger)' : 'var(--success)' }}>{mark.status}</strong>{isAbsent && mark.reason ? ` (${mark.reason})` : ''}</>
+																		: 'Not marked'}
+																</div>
+																<div className="row">
+																	{isAbsent ? (
+																		<>
+																			<button className="btn btn-sm" disabled={correcting} onClick={() => handleCorrect(sid, 'present')}>
+																				Mark present
+																			</button>
+																			<button
+																				className="btn btn-sm btn-ghost"
+																				disabled={correcting}
+																				onClick={() => handleCorrect(sid, 'absent', mark?.reason === 'excused' ? 'unexcused' : 'excused')}
+																			>
+																				{mark?.reason === 'excused' ? 'Set unexcused' : 'Set excused'}
+																			</button>
+																		</>
+																	) : (
+																		<button className="btn btn-sm" disabled={correcting} onClick={() => handleCorrect(sid, 'absent', 'unexcused')}>
+																			Mark absent
+																		</button>
+																	)}
+																</div>
+															</div>
+														)
+													})}
+												</div>
+											</td>
+										</tr>
+									)}
+								</Fragment>
+							))}
+						</tbody>
+					</table>
+				</div>
+			)}
 		</div>
 	)
 }

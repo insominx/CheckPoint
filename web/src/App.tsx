@@ -1,37 +1,32 @@
-import { Link, Route, Routes } from 'react-router-dom'
+import { useEffect } from 'react'
+import { Route, Routes } from 'react-router-dom'
 import Home from './pages/Home'
 import Session from './pages/Session'
 import History from './pages/History'
 import Settings from './pages/Settings'
 import Roster from './pages/Roster'
-import { useStore } from './store'
+import AppShell from './components/AppShell'
 import ErrorBoundary from './ErrorBoundary'
+import { useStore } from './store'
 
 export default function App() {
-	const { selectedClassId } = useStore()
-	const disabled = !selectedClassId
+	const init = useStore((s) => s.init)
+
+	useEffect(() => {
+		init()
+	}, [init])
+
 	return (
-		<div>
-			<nav className="top-nav">
-				<div className="container nav-links">
-					<Link to="/">Home</Link>
-					<Link to="/session" className={disabled ? 'disabled' : ''}>Session</Link>
-					<Link to="/history" className={disabled ? 'disabled' : ''}>History</Link>
-					<Link to="/settings" className={disabled ? 'disabled' : ''}>Settings</Link>
-					<Link to="/roster" className={disabled ? 'disabled' : ''}>Roster</Link>
-				</div>
-			</nav>
-			<main className="container">
-				<ErrorBoundary>
-					<Routes>
-						<Route path="/" element={<Home />} />
-						<Route path="/session" element={<Session />} />
-						<Route path="/history" element={<History />} />
-						<Route path="/settings" element={<Settings />} />
-						<Route path="/roster" element={<Roster />} />
-					</Routes>
-				</ErrorBoundary>
-			</main>
-		</div>
+		<AppShell>
+			<ErrorBoundary>
+				<Routes>
+					<Route path="/" element={<Home />} />
+					<Route path="/session" element={<Session />} />
+					<Route path="/history" element={<History />} />
+					<Route path="/settings" element={<Settings />} />
+					<Route path="/roster" element={<Roster />} />
+				</Routes>
+			</ErrorBoundary>
+		</AppShell>
 	)
 }
