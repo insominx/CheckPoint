@@ -21,11 +21,8 @@ export interface DraftSessionInputs {
 	n: number
 	neverSeenWeight?: number
 	cooldownWeight?: number
-	/** Replaces the derived carryover set (used by re-draw to keep the current ones). */
-	carryoverIdsOverride?: string[]
-	/** Existing draft to preserve id/date/marks from (re-draw). */
-	baseSession?: SessionEntity
-	resetMarks?: boolean
+	/** Existing draft whose identity and carryovers are preserved for a re-draw. */
+	redrawFrom?: SessionEntity
 	/** Injectable for deterministic tests. */
 	newId: () => string
 	now?: () => string
@@ -35,7 +32,7 @@ export interface DraftSessionInputs {
 export function buildDraftSession(inputs: DraftSessionInputs): SessionEntity {
 	const {
 		classId, students, ledger, n,
-		carryoverIdsOverride, baseSession, resetMarks, newId, seed,
+		redrawFrom, newId, seed,
 	} = inputs
 	const now = inputs.now ?? (() => new Date().toISOString())
 
@@ -46,7 +43,7 @@ export function buildDraftSession(inputs: DraftSessionInputs): SessionEntity {
 	const derivedCarryovers = computeCarryovers(studentIds, ledger, sessions)
 
 	const knownIds = new Set(studentIds)
-	const carryoverInput = carryoverIdsOverride !== undefined ? carryoverIdsOverride : derivedCarryovers
+	const carryoverInput = redrawFrom?.carryoverIds ?? derivedCarryovers
 	const carryoverIds = Array.from(new Set(carryoverInput.filter((id) => knownIds.has(id))))
 	const carryoverSet = new Set(carryoverIds)
 
@@ -65,15 +62,15 @@ export function buildDraftSession(inputs: DraftSessionInputs): SessionEntity {
 	const picks = Array.from(new Set<string>([...carryoverIds, ...randomIds]))
 
 	const session: SessionEntity = {
-		id: baseSession?.id ?? newId(),
+		id: redrawFrom?.id ?? newId(),
 		classId,
-		date: baseSession?.date ?? now(),
+		date: redrawFrom?.date ?? now(),
 		picks,
 		carryoverIds,
-		marks: resetMarks ? {} : baseSession?.marks ?? {},
+		marks: {},
 	}
-	if (baseSession?.createdAt) session.createdAt = baseSession.createdAt
-	if (baseSession?.savedAt) session.savedAt = baseSession.savedAt
+	if (redrawFrom?.createdAt) session.createdAt = redrawFrom.createdAt
+	if (redrawFrom?.savedAt) session.savedAt = redrawFrom.savedAt
 
 	return session
 }

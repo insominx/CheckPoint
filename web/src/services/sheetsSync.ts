@@ -9,6 +9,7 @@
 
 import type { AbsenceLedgerItem, ClassEntity, PerClassSettings, SessionEntity, StudentEntity } from '../types'
 import type { SheetTabs } from '../domain/sheetImport'
+import { DEFAULT_N } from '../domain/sessionDraft'
 import {
 	addSheets,
 	batchClearValues,
@@ -16,7 +17,7 @@ import {
 	batchWriteValues,
 	createSpreadsheetWithTabs,
 	getSheetTitles,
-	spreadsheetExists,
+	probeSpreadsheetAccess,
 	type CellValue,
 } from './sheetsClient'
 
@@ -73,7 +74,8 @@ export interface ExportSummary {
  */
 export async function exportClassToSheet(dataset: ExportDataset, spreadsheetId?: string): Promise<ExportSummary> {
 	let id = spreadsheetId
-	if (!id || !(await spreadsheetExists(id))) {
+	const access = id ? await probeSpreadsheetAccess(id) : { status: 'missing' as const }
+	if (!id || access.status === 'missing') {
 		id = await createCheckpointSpreadsheet(`CheckPoint — ${dataset.cls.name}`)
 	} else {
 		await ensureCheckpointTabs(id)
@@ -109,7 +111,7 @@ export async function exportClassToSheet(dataset: ExportDataset, spreadsheetId?:
 	])
 	const settingsRow: CellValue[] = [
 		cls.id, cls.name,
-		settings?.defaultN ?? cls.defaultN,
+		settings?.defaultN ?? DEFAULT_N,
 		settings?.neverSeenWeight ?? 2,
 		settings?.cooldownWeight ?? 0.5,
 		exportedAt,
@@ -118,7 +120,7 @@ export async function exportClassToSheet(dataset: ExportDataset, spreadsheetId?:
 	// Clear old data rows, then write everything (headers included) in one batch.
 	await batchClearValues(id, TAB_NAMES.map((t) => `${t}!A2:Z`))
 	const writes: Array<{ range: string; values: CellValue[][] }> = [
-		{ range: 'Classes!A1', values: [TAB_HEADERS.Classes, [cls.id, cls.name, cls.defaultN]] },
+		{ range: 'Classes!A1', values: [TAB_HEADERS.Classes, [cls.id, cls.name, settings?.defaultN ?? DEFAULT_N]] },
 		{ range: 'Students!A1', values: [TAB_HEADERS.Students, ...studentRows] },
 		{ range: 'Sessions!A1', values: [TAB_HEADERS.Sessions, ...sessionRows] },
 		{ range: 'Marks!A1', values: [TAB_HEADERS.Marks, ...markRows] },

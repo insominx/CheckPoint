@@ -34,7 +34,7 @@ function Icon({ d }: { d: string }) {
 }
 
 export default function AppShell({ children }: { children: ReactNode }) {
-	const { classes, selectedClassId, selectClass } = useStore()
+	const { classes, selectedClass, inFlight, selectClass } = useStore()
 	const navigate = useNavigate()
 
 	return (
@@ -50,7 +50,8 @@ export default function AppShell({ children }: { children: ReactNode }) {
 					<select
 						id="class-switcher"
 						className="select"
-						value={selectedClassId ?? ''}
+						disabled={inFlight !== null}
+						value={selectedClass?.id ?? ''}
 						onChange={async (e) => {
 							await selectClass(e.target.value || undefined)
 							if (!e.target.value) navigate('/')
@@ -70,7 +71,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
 							to={item.to}
 							end={item.to === '/'}
 							className={({ isActive }) =>
-								`nav-item ${isActive ? 'active' : ''} ${item.needsClass && !selectedClassId ? 'disabled' : ''}`
+								`nav-item ${isActive ? 'active' : ''} ${item.needsClass && !selectedClass ? 'disabled' : ''}`
 							}
 						>
 							{item.icon}

@@ -19,8 +19,16 @@ export function getClass(classId: string): Promise<ClassEntity | undefined> {
 }
 
 export async function createClass(name: string): Promise<ClassEntity> {
-	const cls: ClassEntity = { id: uuidv4(), name, defaultN: DEFAULT_N }
-	await db.classes.add(cls)
+	const cls: ClassEntity = { id: uuidv4(), name }
+	await db.transaction('rw', db.classes, db.settings, async () => {
+		await db.classes.add(cls)
+		await db.settings.add({
+			classId: cls.id,
+			defaultN: DEFAULT_N,
+			neverSeenWeight: DEFAULT_NEVER_SEEN_WEIGHT,
+			cooldownWeight: DEFAULT_COOLDOWN_WEIGHT,
+		})
+	})
 	return cls
 }
 
@@ -183,10 +191,10 @@ export function getSettings(classId: string): Promise<PerClassSettings | undefin
 }
 
 export async function getEffectiveSettings(classId: string): Promise<PerClassSettings> {
-	const [cls, settings] = await Promise.all([db.classes.get(classId), db.settings.get(classId)])
+	const settings = await db.settings.get(classId)
 	return {
 		classId,
-		defaultN: settings?.defaultN ?? cls?.defaultN ?? DEFAULT_N,
+		defaultN: settings?.defaultN ?? DEFAULT_N,
 		neverSeenWeight: settings?.neverSeenWeight ?? DEFAULT_NEVER_SEEN_WEIGHT,
 		cooldownWeight: settings?.cooldownWeight ?? DEFAULT_COOLDOWN_WEIGHT,
 		spreadsheetId: settings?.spreadsheetId,
@@ -198,23 +206,27 @@ export async function updateSettings(
 	classId: string,
 	updates: Partial<Pick<PerClassSettings, 'defaultN' | 'neverSeenWeight' | 'cooldownWeight' | 'spreadsheetId' | 'lastExportedAt'>>,
 ): Promise<void> {
-	if (updates.spreadsheetId) {
-		const existing = await db.settings.get(classId)
-		if (updates.spreadsheetId !== existing?.spreadsheetId) {
-			const all = await db.settings.toArray()
-			const conflict = all.find((s) => s.spreadsheetId === updates.spreadsheetId && s.classId !== classId)
+	await db.transaction('rw', db.settings, db.classes, async () => {
+		const current = await db.settings.get(classId)
+		if (updates.spreadsheetId && updates.spreadsheetId !== current?.spreadsheetId) {
+			const conflict = (await db.settings.toArray()).find(
+				(settings) => settings.spreadsheetId === updates.spreadsheetId && settings.classId !== classId,
+			)
 			if (conflict) {
 				const cls = await db.classes.get(conflict.classId)
 				throw new Error(`That spreadsheet is already linked to "${cls?.name ?? conflict.classId}".`)
 			}
 		}
-	}
-	const current = await getEffectiveSettings(classId)
-	await db.settings.put({ ...current, ...updates, classId })
-	if (updates.defaultN !== undefined) {
-		const cls = await db.classes.get(classId)
-		if (cls) await db.classes.put({ ...cls, defaultN: updates.defaultN })
-	}
+		await db.settings.put({
+			classId,
+			defaultN: current?.defaultN ?? DEFAULT_N,
+			neverSeenWeight: current?.neverSeenWeight ?? DEFAULT_NEVER_SEEN_WEIGHT,
+			cooldownWeight: current?.cooldownWeight ?? DEFAULT_COOLDOWN_WEIGHT,
+			spreadsheetId: current?.spreadsheetId,
+			lastExportedAt: current?.lastExportedAt,
+			...updates,
+		})
+	})
 }
 
 // ---------- Import (destructive overwrite of one class) ----------
@@ -239,8 +251,7 @@ export async function replaceClassData(
 		if (data.ledger.length) await db.ledger.bulkAdd(data.ledger)
 
 		const current = await db.settings.get(classId)
-		const cls = await db.classes.get(classId)
-		const defaultN = data.settings?.defaultN ?? current?.defaultN ?? cls?.defaultN ?? DEFAULT_N
+		const defaultN = data.settings?.defaultN ?? current?.defaultN ?? DEFAULT_N
 		await db.settings.put({
 			classId,
 			defaultN,
@@ -249,6 +260,5 @@ export async function replaceClassData(
 			spreadsheetId: data.spreadsheetId ?? current?.spreadsheetId,
 			lastExportedAt: current?.lastExportedAt,
 		})
-		if (cls && cls.defaultN !== defaultN) await db.classes.put({ ...cls, defaultN })
 	})
 }

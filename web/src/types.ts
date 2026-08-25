@@ -3,7 +3,6 @@ export type AbsenceReason = 'excused' | 'unexcused'
 export interface ClassEntity {
 	id: string
 	name: string
-	defaultN: number
 }
 
 export interface StudentEntity {

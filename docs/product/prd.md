@@ -61,13 +61,14 @@ State updates on Save:
 ## 6) Data Model (Local-first; sync optional)
 The implementation uses IndexedDB via Dexie with entities defined in `web/src/types.ts`:
 
-- `ClassEntity`: `{ id: string, name: string, defaultN: number, csvPath?: string }`
+- `ClassEntity`: `{ id: string, name: string }`
 - `StudentEntity`: `{ id: string, classId: string, displayName: string, firstName?, lastName?, externalId?, loginId?, sisId?, notes? }`
 - `SessionEntity`: `{ id: string, classId: string, date: ISODateTime, createdAt?, savedAt?, picks: string[], carryoverIds?: string[], marks: Record<string, { status: 'present'|'absent', reason?, markedAt? }> }`
 - `AbsenceLedgerItem`: `{ id: string, classId: string, studentId: string, date: ISODateTime, sessionId?, reason?, notes? }`
 - `PerClassSettings`: `{ classId: string, defaultN: number, neverSeenWeight: number, cooldownWeight: number, csvFileHandle?: unknown, spreadsheetId?, lastExportedAt? }`
 
 Derived concepts:
+- The Google Sheets `Classes.defaultN` cell is a compatibility projection of `PerClassSettings.defaultN`; it is not a second local authority.
 - Carryovers are derived from the ledger and the most recent Present marks (not stored as a separate index).
 - Absence counts are derived from the ledger (no cached counter is persisted).
 
@@ -169,13 +170,13 @@ Settings:
 - App location: `web/` (Vite SPA).
 - Stack: React + TypeScript + Vite + React Router.
 - State: Zustand store (`web/src/store.ts`).
-- Storage: IndexedDB via Dexie (`web/src/db.ts`).
+- Storage: IndexedDB via Dexie (`web/src/data/db.ts`).
 - CSV: Papaparse (Roster import + History export).
 - Sampling: Weighted random without replacement using `seedrandom` (`web/src/sampling.ts`); weights configurable per class (Settings).
-- Sync: Google Sheets export/import implemented in `web/src/google.ts` (requires `VITE_GOOGLE_CLIENT_ID`).
+- Sync: Google Sheets export/import is implemented by `web/src/services/sheetsClient.ts` and `web/src/services/sheetsSync.ts` (requires `VITE_GOOGLE_CLIENT_ID`).
   - Sheets import is **fail-closed**: data is validated (Students/Sessions/Marks/Ledger) and referential integrity is checked before any destructive local overwrite.
-  - After Sheets export/import/repair, a bounded sync report is persisted at `localStorage['checkpoint_last_sync_report_<classId>']`.
-- Testing: Vitest (no Playwright configured in this repo).
+  - Linked spreadsheet metadata is persisted in the class's `PerClassSettings` row.
+- Testing: Vitest unit tests plus Playwright Chromium end-to-end tests.
 - Build: PWA via `vite-plugin-pwa` (auto-update).
 
 ---

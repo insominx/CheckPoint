@@ -17,7 +17,8 @@ interface RosterEntry {
 type SortKey = 'name' | 'last' | 'absences'
 
 export default function Roster() {
-	const { ready, selectedClassId, selectedClass } = useStore()
+	const { ready, selectedClass } = useStore()
+	const classId = selectedClass?.id
 	const toast = useToast()
 	const [students, setStudents] = useState<RosterEntry[]>([])
 	const [sortKey, setSortKey] = useState<SortKey>('name')
@@ -25,9 +26,9 @@ export default function Roster() {
 	const [importing, setImporting] = useState(false)
 
 	const load = useCallback(async () => {
-		if (!selectedClassId) return
-		setStudents(await repo.getStudentsWithAbsenceCounts(selectedClassId))
-	}, [selectedClassId])
+		if (!classId) return
+		setStudents(await repo.getStudentsWithAbsenceCounts(classId))
+	}, [classId])
 
 	useEffect(() => {
 		load()
@@ -35,7 +36,7 @@ export default function Roster() {
 
 	if (!ready) return null
 
-	if (!selectedClassId) {
+	if (!classId) {
 		return (
 			<div className="page">
 				<div className="empty"><h3>No class selected</h3><p>Pick a class in the sidebar first.</p></div>
@@ -65,7 +66,7 @@ export default function Roster() {
 		setImporting(true)
 		try {
 			const rows = await parseRosterCsv(file)
-			const entities = toStudentEntities(selectedClassId, rows, uuidv4)
+			const entities = toStudentEntities(classId, rows, uuidv4)
 			if (!entities.length) {
 				toast.error('No students found in that CSV. Expected headers like studentId, firstName, lastName, displayName.')
 				return
@@ -78,7 +79,7 @@ export default function Roster() {
 				}
 				ids.add(s.id)
 			}
-			const count = await repo.importRosterStudents(selectedClassId, entities)
+			const count = await repo.importRosterStudents(classId, entities)
 			toast.success(`Imported ${count} student${count === 1 ? '' : 's'}.`)
 			await load()
 		} catch (e) {

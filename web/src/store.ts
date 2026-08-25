@@ -22,28 +22,26 @@ export type PickStatus = 'ok' | 'blocked' | 'no-class' | 'error'
 export type RedrawStatus = PickStatus | 'needs-confirm'
 
 export interface ImportPreview {
+	classId: string
 	spreadsheetId: string
 	parsed: ParsedImport
 }
 
 interface PickOptions {
 	allowExistingSession?: boolean
-	carryoverIdsOverride?: string[]
-	baseSession?: SessionEntity
-	resetMarks?: boolean
+	redrawFrom?: SessionEntity
 }
 
-type BusyKey = 'pick' | 'save' | 'export' | 'import'
+export type BusyKey = 'pick' | 'save' | 'export' | 'import'
 
 interface StoreState {
 	/** True once init() has restored persisted selection; pages wait on this before redirecting. */
 	ready: boolean
 	classes: ClassEntity[]
-	selectedClassId?: string
 	selectedClass?: ClassEntity
 	currentN: number
 	currentSession?: SessionEntity
-	busy: Record<BusyKey, boolean>
+	inFlight: BusyKey | null
 
 	/** Restores the last selected class (and any draft session) on app start. */
 	init: () => Promise<void>
@@ -80,26 +78,34 @@ function readDraft(classId: string): SessionEntity | undefined {
 }
 
 export const useStore = create<StoreState>((set, get) => {
-	const setBusy = (key: BusyKey, value: boolean) =>
-		set((s) => ({ busy: { ...s.busy, [key]: value } }))
+	let initGeneration = 0
+	let selectionGeneration = 0
+	const acquire = (key: BusyKey) => {
+		if (get().inFlight !== null) return false
+		set({ inFlight: key })
+		return true
+	}
+	const release = (key: BusyKey) => {
+		if (get().inFlight === key) set({ inFlight: null })
+	}
 
 	return {
 		ready: false,
 		classes: [],
 		currentN: DEFAULT_N,
-		busy: { pick: false, save: false, export: false, import: false },
+		inFlight: null,
 
 		async init() {
+			const generation = ++initGeneration
+			const isCurrentInit = () => generation === initGeneration
+			set({ ready: false })
 			try {
 				await get().refreshClasses()
+				if (!isCurrentInit()) return
 				const saved = localStorage.getItem(SELECTED_CLASS_KEY)
-				if (saved) {
-					const cls = await repo.getClass(saved)
-					if (cls) await get().selectClass(saved)
-					else localStorage.removeItem(SELECTED_CLASS_KEY)
-				}
+				if (saved) await get().selectClass(saved)
 			} finally {
-				set({ ready: true })
+				if (isCurrentInit()) set({ ready: true })
 			}
 		},
 
@@ -118,15 +124,26 @@ export const useStore = create<StoreState>((set, get) => {
 		},
 
 		async selectClass(classId) {
+			if (get().inFlight !== null) return
+			const generation = ++selectionGeneration
+			const isCurrentSelection = () => generation === selectionGeneration
 			if (!classId) {
+				if (!isCurrentSelection()) return
 				localStorage.removeItem(SELECTED_CLASS_KEY)
-				set({ selectedClassId: undefined, selectedClass: undefined, currentSession: undefined, currentN: DEFAULT_N })
+				set({ selectedClass: undefined, currentSession: undefined, currentN: DEFAULT_N })
 				return
 			}
-			const [cls, settings] = await Promise.all([repo.getClass(classId), repo.getEffectiveSettings(classId)])
+			const cls = await repo.getClass(classId)
+			if (!isCurrentSelection()) return
+			if (!cls) {
+				localStorage.removeItem(SELECTED_CLASS_KEY)
+				set({ selectedClass: undefined, currentSession: undefined, currentN: DEFAULT_N })
+				return
+			}
+			const settings = await repo.getEffectiveSettings(classId)
+			if (!isCurrentSelection()) return
 			localStorage.setItem(SELECTED_CLASS_KEY, classId)
 			set({
-				selectedClassId: classId,
 				selectedClass: cls,
 				currentN: settings.defaultN ?? DEFAULT_N,
 				currentSession: readDraft(classId),
@@ -134,10 +151,11 @@ export const useStore = create<StoreState>((set, get) => {
 		},
 
 		async deleteClass(classId) {
+			if (get().inFlight !== null) return { ok: false, error: 'Another operation is already in progress.' }
 			try {
 				await repo.deleteClassCascade(classId)
 				localStorage.removeItem(draftKey(classId))
-				if (get().selectedClassId === classId) await get().selectClass(undefined)
+				if (get().selectedClass?.id === classId) await get().selectClass(undefined)
 				else if (get().currentSession?.classId === classId) set({ currentSession: undefined })
 				await get().refreshClasses()
 				return ok(undefined)
@@ -147,12 +165,11 @@ export const useStore = create<StoreState>((set, get) => {
 		},
 
 		async pickStudents(opts) {
-			const classId = get().selectedClassId
+			const classId = get().selectedClass?.id
 			if (!classId) return 'no-class'
-			if (get().busy.pick) return 'blocked'
 			if (get().currentSession && !opts?.allowExistingSession) return 'blocked'
+			if (!acquire('pick')) return 'blocked'
 
-			setBusy('pick', true)
 			try {
 				const { students, sessions, ledger, settings } = await repo.getClassDataset(classId)
 				const session = buildDraftSession({
@@ -163,31 +180,27 @@ export const useStore = create<StoreState>((set, get) => {
 					n: get().currentN,
 					neverSeenWeight: settings?.neverSeenWeight,
 					cooldownWeight: settings?.cooldownWeight,
-					carryoverIdsOverride: opts?.carryoverIdsOverride,
-					baseSession: opts?.baseSession,
-					resetMarks: opts?.resetMarks,
+					redrawFrom: opts?.redrawFrom,
 					newId: uuidv4,
 				})
+				if (get().selectedClass?.id !== classId) return 'blocked'
 				set({ currentSession: session })
 				return 'ok'
 			} catch {
 				return 'error'
 			} finally {
-				setBusy('pick', false)
+				release('pick')
 			}
 		},
 
 		async redrawRandom(opts) {
-			if (get().busy.pick) return 'blocked'
 			const current = get().currentSession
 			if (!current) return get().pickStudents()
 			const hasMarks = Object.keys(current.marks || {}).length > 0
 			if (hasMarks && !opts?.allowResetMarks) return 'needs-confirm'
 			return get().pickStudents({
 				allowExistingSession: true,
-				carryoverIdsOverride: current.carryoverIds,
-				baseSession: current,
-				resetMarks: hasMarks,
+				redrawFrom: current,
 			})
 		},
 
@@ -199,16 +212,16 @@ export const useStore = create<StoreState>((set, get) => {
 		},
 
 		discardDraft() {
-			const classId = get().selectedClassId
+			const classId = get().currentSession?.classId
 			if (classId) localStorage.removeItem(draftKey(classId))
 			set({ currentSession: undefined })
 		},
 
 		async saveSession() {
 			const session = get().currentSession
-			const classId = get().selectedClassId
-			if (!session || !classId) return { ok: false, error: 'No session in progress.' }
-			setBusy('save', true)
+			const classId = get().selectedClass?.id
+			if (!session || !classId || session.classId !== classId) return { ok: false, error: 'No session in progress.' }
+			if (!acquire('save')) return { ok: false, error: 'Another operation is already in progress.' }
 			try {
 				const nowISO = new Date().toISOString()
 				await repo.saveSessionWithLedger({
@@ -217,18 +230,20 @@ export const useStore = create<StoreState>((set, get) => {
 					savedAt: nowISO,
 					createdAt: session.createdAt ?? session.date ?? nowISO,
 				})
-				localStorage.removeItem(draftKey(classId))
-				set({ currentSession: undefined })
+				if (get().currentSession === session) {
+					localStorage.removeItem(draftKey(classId))
+					set({ currentSession: undefined })
+				}
 				return ok(undefined)
 			} catch (e) {
 				return fail(e)
 			} finally {
-				setBusy('save', false)
+				release('save')
 			}
 		},
 
 		async updateSettings(updates) {
-			const classId = get().selectedClassId
+			const classId = get().selectedClass?.id
 			if (!classId) return { ok: false, error: 'No class selected.' }
 			try {
 				const normalized = { ...updates }
@@ -244,27 +259,28 @@ export const useStore = create<StoreState>((set, get) => {
 		},
 
 		async exportToSheets() {
-			const classId = get().selectedClassId
+			const classId = get().selectedClass?.id
 			if (!classId) return { ok: false, error: 'No class selected.' }
-			setBusy('export', true)
+			if (!acquire('export')) return { ok: false, error: 'Another operation is already in progress.' }
 			try {
 				await getAccessToken(SHEETS_AND_DRIVE_SCOPES)
 				const { cls, students, sessions, ledger, settings } = await repo.getClassDataset(classId)
 				if (!cls) return { ok: false, error: 'Class not found.' }
 				const summary = await exportClassToSheet({ cls, students, sessions, ledger, settings }, settings?.spreadsheetId)
+				if (get().selectedClass?.id !== classId) return { ok: false, error: 'Selected class changed during export.' }
 				await repo.updateSettings(classId, { spreadsheetId: summary.spreadsheetId, lastExportedAt: summary.exportedAt })
 				return ok(summary)
 			} catch (e) {
 				return fail(e)
 			} finally {
-				setBusy('export', false)
+				release('export')
 			}
 		},
 
 		async previewImport() {
-			const classId = get().selectedClassId
+			const classId = get().selectedClass?.id
 			if (!classId) return { ok: false, error: 'No class selected.' }
-			setBusy('import', true)
+			if (!acquire('import')) return { ok: false, error: 'Another operation is already in progress.' }
 			try {
 				const settings = await repo.getSettings(classId)
 				if (!settings?.spreadsheetId) return { ok: false, error: 'No spreadsheet linked to this class yet.' }
@@ -272,18 +288,20 @@ export const useStore = create<StoreState>((set, get) => {
 				const tabs = await fetchClassTabs(settings.spreadsheetId)
 				const parsed = parseSheetExport(tabs, classId)
 				if (!parsed.ok) return { ok: false, error: parsed.error }
-				return ok({ spreadsheetId: settings.spreadsheetId, parsed: parsed.data })
+				if (get().selectedClass?.id !== classId) return { ok: false, error: 'Selected class changed during import preview.' }
+				return ok({ classId, spreadsheetId: settings.spreadsheetId, parsed: parsed.data })
 			} catch (e) {
 				return fail(e)
 			} finally {
-				setBusy('import', false)
+				release('import')
 			}
 		},
 
 		async applyImport(preview) {
-			const classId = get().selectedClassId
+			const classId = get().selectedClass?.id
 			if (!classId) return { ok: false, error: 'No class selected.' }
-			setBusy('import', true)
+			if (preview.classId !== classId) return { ok: false, error: 'Import preview belongs to another class.' }
+			if (!acquire('import')) return { ok: false, error: 'Another operation is already in progress.' }
 			try {
 				await repo.replaceClassData(classId, {
 					students: preview.parsed.students,
@@ -293,15 +311,16 @@ export const useStore = create<StoreState>((set, get) => {
 					spreadsheetId: preview.spreadsheetId,
 				})
 				// Any in-progress draft may reference students that no longer exist.
+				if (get().selectedClass?.id !== classId) return { ok: false, error: 'Selected class changed during import.' }
 				localStorage.removeItem(draftKey(classId))
-				set({ currentSession: undefined })
+				if (get().currentSession?.classId === classId) set({ currentSession: undefined })
 				const settings = await repo.getEffectiveSettings(classId)
 				set({ currentN: settings.defaultN ?? DEFAULT_N })
 				return ok(undefined)
 			} catch (e) {
 				return fail(e)
 			} finally {
-				setBusy('import', false)
+				release('import')
 			}
 		},
 	}
@@ -309,7 +328,7 @@ export const useStore = create<StoreState>((set, get) => {
 
 // Draft autosave: persist the in-progress session so a refresh doesn't lose marks.
 useStore.subscribe((state) => {
-	if (state.currentSession && state.selectedClassId) {
-		localStorage.setItem(draftKey(state.selectedClassId), JSON.stringify(state.currentSession))
+	if (state.currentSession && state.currentSession.classId === state.selectedClass?.id) {
+		localStorage.setItem(draftKey(state.currentSession.classId), JSON.stringify(state.currentSession))
 	}
 })

@@ -1,10 +1,11 @@
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { useConfirm } from '../components/Dialog'
 import { useToast } from '../components/Toast'
 import * as repo from '../data/repository'
 import { exportAbsencesCsv } from '../utils/csv'
-import type { AbsenceReason, SessionEntity } from '../types'
+import type { AbsenceReason } from '../types'
+import { reduceExpansion, shouldCommitHistoryDetails, shouldCommitHistoryRows } from './historyExpansion'
 
 interface SessionRow {
 	id: string
@@ -14,23 +15,28 @@ interface SessionRow {
 	absent: number
 }
 
-interface ExpandedDetails {
-	session: SessionEntity
-	studentNames: Record<string, string>
-}
-
 export default function History() {
-	const { ready, selectedClassId, selectedClass } = useStore()
+	const { ready, selectedClass } = useStore()
+	const classId = selectedClass?.id
 	const confirm = useConfirm()
 	const toast = useToast()
 	const [rows, setRows] = useState<SessionRow[]>([])
-	const [expandedId, setExpandedId] = useState<string | null>(null)
-	const [expanded, setExpanded] = useState<ExpandedDetails | null>(null)
-	const [correcting, setCorrecting] = useState(false)
+	const [expansion, dispatchExpansion] = useReducer(reduceExpansion, { kind: 'closed' })
+	const requestId = useRef(0)
+	const rowsRequestId = useRef(0)
+	const currentClassId = useRef(classId)
+	currentClassId.current = classId
 
-	const load = useCallback(async () => {
-		if (!selectedClassId) return
-		const sessions = await repo.getSessions(selectedClassId)
+	const load = useCallback(async (targetClassId = classId) => {
+		if (!targetClassId) return
+		const request = ++rowsRequestId.current
+		const sessions = await repo.getSessions(targetClassId)
+		if (!shouldCommitHistoryRows({
+			requestedClassId: targetClassId,
+			currentClassId: currentClassId.current,
+			requestedGeneration: request,
+			currentGeneration: rowsRequestId.current,
+		})) return
 		setRows(
 			sessions.map((s) => {
 				const marks = Object.values(s.marks)
@@ -43,17 +49,18 @@ export default function History() {
 				}
 			}),
 		)
-	}, [selectedClassId])
+	}, [classId])
 
 	useEffect(() => {
-		load()
-		setExpandedId(null)
-		setExpanded(null)
-	}, [load])
+		requestId.current += 1
+		dispatchExpansion({ type: 'close' })
+		setRows([])
+		void load(classId)
+	}, [classId, load])
 
 	if (!ready) return null
 
-	if (!selectedClassId) {
+	if (!classId) {
 		return (
 			<div className="page">
 				<div className="empty"><h3>No class selected</h3><p>Pick a class in the sidebar first.</p></div>
@@ -61,48 +68,56 @@ export default function History() {
 		)
 	}
 
-	const loadDetails = async (sessionId: string) => {
+	const loadDetails = async (targetClassId: string, sessionId: string, request: number) => {
 		const [session, students] = await Promise.all([
 			repo.getSession(sessionId),
-			repo.getStudents(selectedClassId),
+			repo.getStudents(targetClassId),
 		])
-		if (!session) return
+		if (!session || !shouldCommitHistoryDetails({
+			requestedClassId: targetClassId,
+			currentClassId: currentClassId.current,
+			requestedGeneration: request,
+			currentGeneration: requestId.current,
+			sessionClassId: session.classId,
+		})) return
 		const studentNames: Record<string, string> = {}
 		for (const s of students) studentNames[s.id] = s.displayName
-		setExpanded({ session, studentNames })
+		dispatchExpansion({ type: 'loaded', classId: targetClassId, sessionId, requestId: request, details: { session, studentNames } })
 	}
 
 	const handleExpand = async (sessionId: string) => {
-		if (expandedId === sessionId) {
-			setExpandedId(null)
-			setExpanded(null)
+		if (expansion.kind !== 'closed' && expansion.sessionId === sessionId) {
+			requestId.current += 1
+			dispatchExpansion({ type: 'close' })
 			return
 		}
-		setExpandedId(sessionId)
-		await loadDetails(sessionId)
+		const request = ++requestId.current
+		dispatchExpansion({ type: 'load', classId, sessionId, requestId: request })
+		await loadDetails(classId, sessionId, request)
 	}
 
 	const handleCorrect = async (studentId: string, newStatus: 'present' | 'absent', reason?: AbsenceReason) => {
-		if (!expandedId) return
-		setCorrecting(true)
+		if (expansion.kind !== 'open' || expansion.classId !== classId) return
+		const { classId: targetClassId, sessionId, requestId: request } = expansion
+		dispatchExpansion({ type: 'correcting', classId: targetClassId, sessionId, requestId: request, value: true })
 		try {
-			await repo.correctMark(selectedClassId, expandedId, studentId, newStatus, reason)
-			await Promise.all([load(), loadDetails(expandedId)])
+			await repo.correctMark(targetClassId, sessionId, studentId, newStatus, reason)
+			await Promise.all([load(targetClassId), loadDetails(targetClassId, sessionId, request)])
 		} finally {
-			setCorrecting(false)
+			dispatchExpansion({ type: 'correcting', classId: targetClassId, sessionId, requestId: request, value: false })
 		}
 	}
 
 	const handleExportCsv = async () => {
 		const [items, students] = await Promise.all([
-			repo.getLedger(selectedClassId),
-			repo.getStudents(selectedClassId),
+			repo.getLedger(classId),
+			repo.getStudents(classId),
 		])
 		if (!items.length) {
 			toast.info('No absences recorded yet — nothing to export.')
 			return
 		}
-		exportAbsencesCsv(selectedClassId, items, new Map(students.map((s) => [s.id, s.displayName])))
+		exportAbsencesCsv(classId, items, new Map(students.map((s) => [s.id, s.displayName])))
 	}
 
 	const handleClearAll = async () => {
@@ -113,10 +128,10 @@ export default function History() {
 			danger: true,
 		})
 		if (!proceed) return
-		await repo.clearHistoryForClass(selectedClassId)
+		await repo.clearHistoryForClass(classId)
 		await load()
-		setExpandedId(null)
-		setExpanded(null)
+		requestId.current += 1
+		dispatchExpansion({ type: 'close' })
 		toast.success('History cleared.')
 	}
 
@@ -128,11 +143,11 @@ export default function History() {
 			danger: true,
 		})
 		if (!proceed) return
-		await repo.deleteSessionCascade(selectedClassId, sessionId)
+		await repo.deleteSessionCascade(classId, sessionId)
 		await load()
-		if (expandedId === sessionId) {
-			setExpandedId(null)
-			setExpanded(null)
+		if (expansion.kind !== 'closed' && expansion.sessionId === sessionId) {
+			requestId.current += 1
+			dispatchExpansion({ type: 'close' })
 		}
 	}
 
@@ -171,7 +186,7 @@ export default function History() {
 							{rows.map((r) => (
 								<Fragment key={r.id}>
 									<tr className="clickable" onClick={() => handleExpand(r.id)}>
-										<td className="muted">{expandedId === r.id ? '▾' : '▸'}</td>
+										<td className="muted">{expansion.kind !== 'closed' && expansion.sessionId === r.id ? '▾' : '▸'}</td>
 										<td>{new Date(r.date).toLocaleString()}</td>
 										<td className="num">{r.picks}</td>
 										<td className="num">{r.present}</td>
@@ -188,19 +203,19 @@ export default function History() {
 											</button>
 										</td>
 									</tr>
-									{expandedId === r.id && expanded && (
+									{expansion.kind === 'open' && expansion.sessionId === r.id && (
 										<tr className="expand-row">
 											<td colSpan={6}>
 												<p className="faint" style={{ marginBottom: 10 }}>Click a status to correct it — the absence ledger stays in sync.</p>
 												<div className="cards">
-													{expanded.session.picks.map((sid) => {
-														const mark = expanded.session.marks[sid]
+													{expansion.details.session.picks.map((sid) => {
+														const mark = expansion.details.session.marks[sid]
 														const isAbsent = mark?.status === 'absent'
-														const isCarryover = expanded.session.carryoverIds?.includes(sid)
+														const isCarryover = expansion.details.session.carryoverIds?.includes(sid)
 														return (
 															<div key={sid} className={`student-card ${isCarryover ? 'carryover' : ''}`}>
 																<div className="name">
-																	<span>{expanded.studentNames[sid] ?? sid}</span>
+																	<span>{expansion.details.studentNames[sid] ?? sid}</span>
 																	{isCarryover && <span className="badge badge-warn">recheck</span>}
 																</div>
 																<div className="meta">
@@ -211,19 +226,19 @@ export default function History() {
 																<div className="row">
 																	{isAbsent ? (
 																		<>
-																			<button className="btn btn-sm" disabled={correcting} onClick={() => handleCorrect(sid, 'present')}>
+																		<button className="btn btn-sm" disabled={expansion.correcting} onClick={() => handleCorrect(sid, 'present')}>
 																				Mark present
 																			</button>
 																			<button
 																				className="btn btn-sm btn-ghost"
-																				disabled={correcting}
+																			disabled={expansion.correcting}
 																				onClick={() => handleCorrect(sid, 'absent', mark?.reason === 'excused' ? 'unexcused' : 'excused')}
 																			>
 																				{mark?.reason === 'excused' ? 'Set unexcused' : 'Set excused'}
 																			</button>
 																		</>
 																	) : (
-																		<button className="btn btn-sm" disabled={correcting} onClick={() => handleCorrect(sid, 'absent', 'unexcused')}>
+																	<button className="btn btn-sm" disabled={expansion.correcting} onClick={() => handleCorrect(sid, 'absent', 'unexcused')}>
 																			Mark absent
 																		</button>
 																	)}

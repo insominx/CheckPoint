@@ -111,13 +111,19 @@ export async function addSheets(spreadsheetId: string, titles: string[]): Promis
 	})
 }
 
-export async function spreadsheetExists(spreadsheetId: string): Promise<boolean> {
+export type SpreadsheetAccessProbe =
+	| { status: 'accessible' }
+	| { status: 'missing' }
+
+export async function probeSpreadsheetAccess(spreadsheetId: string): Promise<SpreadsheetAccessProbe> {
 	const token = await getAccessToken()
 	const res = await fetch(`${base}/${encodeURIComponent(spreadsheetId)}?fields=spreadsheetId`, {
 		headers: { Authorization: `Bearer ${token}` },
 	})
-	if (res.status === 404 || res.status === 403) return false
-	return res.ok
+	if (res.status === 404) return { status: 'missing' }
+	if (res.ok) return { status: 'accessible' }
+	const text = await res.text().catch(() => '')
+	throw new Error(`Google API error ${res.status}: ${text || res.statusText}`)
 }
 
 /** Reads multiple A1 ranges in one request; returns them in input order. */

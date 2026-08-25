@@ -87,7 +87,7 @@
 ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
 │   Class     │──1:N─│   Student   │──1:N─│ AbsenceLedger│
 │  id, name   │      │ id, classId │      │ studentId    │
-│  defaultN   │      │ displayName │      │ date, reason │
+│             │      │ displayName │      │ date, reason │
 └─────────────┘      └─────────────┘      └─────────────┘
        │                   │
       1:1                 1:N
@@ -108,7 +108,7 @@
 - **Student**: Enrolled student with display name and optional metadata (firstName, lastName, loginId, sisId)
 - **Session**: A single attendance check event with picks, marks, and timestamps
 - **AbsenceLedger**: Append-only log of all absences — **single source of truth**
-- **PerClassSettings**: Per-class configuration (N, neverSeenWeight, cooldownWeight, CSV file handle, Google Sheets ID)
+- **PerClassSettings**: The single local authority for per-class configuration (N, neverSeenWeight, cooldownWeight, Google Sheets ID). The Sheets `Classes.defaultN` column is only a compatibility projection.
 
 ---
 
@@ -135,7 +135,7 @@
 5. **Desktop-First, Mobile-Friendly**: Optimized for laptop use, responsive design
 6. **Ledger as Single Source of Truth**: Absence counts derived from ledger, not cached
 7. **Fail-Closed External Import**: Google Sheets is user-editable, so imports validate strictly and avoid destructive local overwrites on invalid data.
-8. **Operation-Scoped UI Status**: UI “loading/error” is tracked per operation (pick/save/export/import/repair) to avoid cross-feature state clobbering.
+8. **Exclusive Operation-Keyed Status**: One `inFlight` operation key (pick/save/export/import) admits long-running store work and supplies operation-specific UI labels without allowing overlap.
 
 ---
 
@@ -143,37 +143,38 @@
 
 - **Single authority**
   - `web/src/store.ts` is the orchestration authority for domain operations and external sync.
-  - Durable state is in IndexedDB via Dexie (`web/src/db.ts`).
+  - Durable state is in IndexedDB via Dexie (`web/src/data/db.ts`).
 
-- **Operation-scoped async status**
-  - Store tracks per-operation status under `opStatus` (e.g., `pickStudents`, `saveSession`, `exportSheets`, `importSheets`, `repairSheets`) rather than one global “loading” flag.
-  - Motivation: prevent Sheets ops from disabling or overwriting Session pick/redraw/save UI state.
+- **Exclusive async status**
+  - Store tracks one operation key under `inFlight` (`pick`, `save`, `export`, or `import`). A second long-running action and class switching are rejected until the owner releases the slot.
+  - The key lets Session and Settings render operation-specific labels while the single admission point prevents cross-page overlap.
 
 - **Sheets import safety**
-  - Imports are guarded by “identity before I/O” (`probeCheckpointSpreadsheetIdentity` in `web/src/google.ts`).
+  - Imports are parsed and validated by `web/src/domain/sheetImport.ts`; Google transport lives in `web/src/services/sheetsClient.ts` and `web/src/services/sheetsSync.ts`.
   - Import is **validate → commit**:
     - Validate Students/Sessions/Marks/Ledger rows.
     - Check referential integrity (e.g., marks/ledger do not reference missing students/sessions).
     - Only then perform the destructive local overwrite transaction.
 
-- **Sync report artifact**
-  - After Sheets export/import/repair, the store writes a bounded JSON report to:
-    - `localStorage['checkpoint_last_sync_report_<classId>']`
-  - Intended use: reproducible debugging without adding telemetry.
+- **Persisted browser keys**
+  - The selected class uses `checkpoint_selected_class`; unsaved sessions use `checkpoint_draft_session_<classId>`.
 
 ## Testing
 
 | Type | Tool | Location |
 |------|------|----------|
-| Unit | Vitest | `web/src/*.test.ts` |
+| Unit | Vitest | `web/src/**/*.test.ts` and `web/src/**/*.test.tsx` |
+| Browser | Playwright | `web/e2e/*.spec.ts` |
 
 Run: `cd web && npm test`
 
 **Tested modules:**
-- `attendance.ts` — Carryover computation, weight calculation
-- `google.ts` — Spreadsheet ID parsing and identity probing (unit tests)
-- `sync.ts` — Conflict detection, operation guards
-- `validation.ts` — Input validation for entities
+- `attendance.ts` — carryover computation and weight calculation
+- `validation.ts` — entity input validation
+- `sheetImport.ts` — fail-closed spreadsheet parsing and referential integrity
+- `sessionDraft.ts` — fresh-draw and redraw invariants
+- `sampling.ts` — deterministic weighted sampling
+- `sheetsClient.ts`, `sheetsSync.ts`, and `store.ts` — external-boundary policy and operation guards
 
 ---
 

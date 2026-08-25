@@ -6,18 +6,21 @@ import { VitePWA } from 'vite-plugin-pwa'
 // https://vite.dev/config/
 export default defineConfig({
 	test: {
-		include: ['src/**/*.test.ts'],
+		include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
 	},
 	plugins: [
 		react(),
 		VitePWA({
 			registerType: 'autoUpdate',
+			devOptions: { enabled: true },
 			manifest: {
 				name: 'CheckPoint',
 				short_name: 'CheckPoint',
 				description: 'Attendance spot-check app for teachers',
 				theme_color: '#0b1017',
 				background_color: '#0b1017',
+				display: 'standalone',
+				start_url: '/',
 				icons: [
 					{
 						src: 'logo-192.png',

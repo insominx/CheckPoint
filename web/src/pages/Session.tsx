@@ -5,6 +5,7 @@ import { useConfirm } from '../components/Dialog'
 import { useToast } from '../components/Toast'
 import * as repo from '../data/repository'
 import type { AbsenceReason } from '../types'
+import { drawFailureMessage, shouldAutoDraw, shouldCommitStudentInfo } from './sessionDraw'
 
 interface StudentInfo {
 	displayName: string
@@ -16,44 +17,56 @@ export default function Session() {
 	const confirm = useConfirm()
 	const toast = useToast()
 	const {
-		ready, selectedClassId, currentSession, currentN, busy,
+		ready, selectedClass, currentSession, currentN, inFlight,
 		pickStudents, redrawRandom, markStudent, saveSession, discardDraft,
 	} = useStore()
+	const classId = selectedClass?.id
 	const [studentInfo, setStudentInfo] = useState<Record<string, StudentInfo>>({})
 	const [reasonById, setReasonById] = useState<Record<string, AbsenceReason>>({})
+	const [drawFailure, setDrawFailure] = useState<string | null>(null)
+	const lastAttemptedClass = useRef<string | undefined>(undefined)
 
 	useEffect(() => {
-		if (ready && !selectedClassId) navigate('/')
-	}, [ready, selectedClassId, navigate])
+		if (ready && !classId) navigate('/')
+	}, [ready, classId, navigate])
 
-	// Draw once when arriving without a session (fresh visit or after a reload with no
-	// draft). Never re-draw after save/discard — those flows leave the page explicitly.
-	const autoPicked = useRef(false)
+	const attemptDraw = useCallback(async (targetClassId: string) => {
+		lastAttemptedClass.current = targetClassId
+		setDrawFailure(null)
+		const result = await pickStudents()
+		if (useStore.getState().selectedClass?.id !== targetClassId) return
+		setDrawFailure(drawFailureMessage(result))
+	}, [pickStudents])
+
+	// Draw once per selected class. A restored draft counts as the class's completed draw.
 	useEffect(() => {
-		if (!ready || !selectedClassId) return
-		if (currentSession) {
-			// A restored draft counts as this mount's draw.
-			autoPicked.current = true
+		if (!ready || !classId) return
+		if (currentSession?.classId === classId) {
+			lastAttemptedClass.current = classId
+			setDrawFailure(null)
 			return
 		}
-		if (busy.pick || autoPicked.current) return
-		autoPicked.current = true
-		pickStudents()
-	}, [ready, currentSession, selectedClassId, busy.pick, pickStudents])
-
-	const loadStudentInfo = useCallback(async () => {
-		if (!selectedClassId) return
-		const students = await repo.getStudentsWithAbsenceCounts(selectedClassId)
-		const info: Record<string, StudentInfo> = {}
-		for (const s of students) info[s.id] = { displayName: s.displayName, absenceCount: s.absenceCount }
-		setStudentInfo(info)
-	}, [selectedClassId])
+		if (!shouldAutoDraw({
+			ready, classId, currentSessionClassId: currentSession?.classId,
+			inFlight, lastAttemptedClass: lastAttemptedClass.current,
+		})) return
+		void attemptDraw(classId)
+	}, [ready, currentSession, classId, inFlight, attemptDraw])
 
 	useEffect(() => {
-		loadStudentInfo()
-	}, [loadStudentInfo])
+		let isMounted = true
+		setStudentInfo({})
+		if (!classId) return () => { isMounted = false }
+		void repo.getStudentsWithAbsenceCounts(classId).then((students) => {
+			if (!shouldCommitStudentInfo({ requestedClassId: classId, currentClassId: useStore.getState().selectedClass?.id, isMounted })) return
+			const info: Record<string, StudentInfo> = {}
+			for (const s of students) info[s.id] = { displayName: s.displayName, absenceCount: s.absenceCount }
+			setStudentInfo(info)
+		})
+		return () => { isMounted = false }
+	}, [classId])
 
-	if (!ready || !selectedClassId) return null
+	if (!ready || !classId) return null
 
 	if (!currentSession) {
 		return (
@@ -61,9 +74,14 @@ export default function Session() {
 				<div className="page-header">
 					<div>
 						<h1>Session</h1>
-						<p className="sub">Drawing students…</p>
+						<p className="sub">{drawFailure ?? 'Drawing students…'}</p>
 					</div>
 				</div>
+				{drawFailure && (
+					<button className="btn btn-primary" onClick={() => void attemptDraw(classId)} disabled={inFlight !== null}>
+						Retry
+					</button>
+				)}
 			</div>
 		)
 	}
@@ -73,7 +91,7 @@ export default function Session() {
 	const markedCount = picks.filter((sid) => !!currentSession.marks[sid]).length
 	const allMarked = picks.length > 0 && markedCount === picks.length
 	const absentCount = picks.filter((sid) => currentSession.marks[sid]?.status === 'absent').length
-	const actionBusy = busy.pick || busy.save
+	const actionBusy = inFlight !== null
 	const isResumedDraft = Date.now() - Date.parse(currentSession.date) > 2 * 60 * 60 * 1000
 
 	const handleRedraw = async () => {
@@ -144,7 +162,7 @@ export default function Session() {
 				<button className="btn btn-ghost" onClick={handleDiscard} disabled={actionBusy}>Discard</button>
 				<button className="btn" onClick={handleRedraw} disabled={actionBusy}>Re-draw</button>
 				<button className="btn btn-primary" onClick={handleSave} disabled={!allMarked || actionBusy}>
-					{busy.save ? 'Saving…' : 'Save session'}
+					{inFlight === 'save' ? 'Saving…' : 'Save session'}
 				</button>
 			</div>
 

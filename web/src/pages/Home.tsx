@@ -15,7 +15,8 @@ interface ClassStats {
 }
 
 export default function Home() {
-	const { classes, selectedClassId, selectedClass, selectClass, createClass, deleteClass, currentSession } = useStore()
+	const { classes, selectedClass, selectClass, createClass, deleteClass, currentSession } = useStore()
+	const classId = selectedClass?.id
 	const navigate = useNavigate()
 	const confirm = useConfirm()
 	const toast = useToast()
@@ -23,11 +24,11 @@ export default function Home() {
 	const [stats, setStats] = useState<ClassStats | null>(null)
 
 	const loadStats = useCallback(async () => {
-		if (!selectedClassId) {
+		if (!classId) {
 			setStats(null)
 			return
 		}
-		const { students, sessions, ledger } = await repo.getClassDataset(selectedClassId)
+		const { students, sessions, ledger } = await repo.getClassDataset(classId)
 		const sorted = [...sessions].sort((a, b) => Date.parse(b.date) - Date.parse(a.date))
 		const carryovers = computeCarryovers(students.map((s) => s.id), ledger, sorted)
 		setStats({
@@ -37,7 +38,7 @@ export default function Home() {
 			absences: ledger.length,
 			lastSessionDate: sorted[0]?.date,
 		})
-	}, [selectedClassId])
+	}, [classId])
 
 	useEffect(() => {
 		loadStats()
@@ -80,7 +81,7 @@ export default function Home() {
 				</div>
 			</div>
 
-			{selectedClassId && selectedClass && (
+			{classId && selectedClass && (
 				<section className="panel">
 					<header>
 						<div>
@@ -138,11 +139,11 @@ export default function Home() {
 									<tr key={c.id}>
 										<td style={{ fontWeight: 550 }}>
 											{c.name}{' '}
-											{c.id === selectedClassId && <span className="badge badge-success">active</span>}
+											{c.id === classId && <span className="badge badge-success">active</span>}
 										</td>
 										<td style={{ textAlign: 'right' }}>
 											<div className="row" style={{ justifyContent: 'flex-end' }}>
-												{c.id !== selectedClassId && (
+												{c.id !== classId && (
 													<button className="btn btn-sm" onClick={() => selectClass(c.id)}>Switch to</button>
 												)}
 												<button className="btn btn-sm btn-danger" onClick={() => handleDelete(c.id, c.name)}>

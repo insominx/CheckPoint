@@ -75,22 +75,28 @@ describe('buildDraftSession', () => {
 	})
 
 	it('re-draw keeps id, date, and carryovers from the base session', () => {
-		const base = session({ id: 'existing', date: '2026-01-05T09:00:00Z', carryoverIds: ['a'], picks: ['a', 'b'] })
+		const base = session({
+			id: 'existing', date: '2026-01-05T09:00:00Z', createdAt: '2026-01-05T08:59:00Z',
+			savedAt: '2026-01-05T09:01:00Z', carryoverIds: ['ghost', 'a'], picks: ['a', 'b'],
+			marks: { a: { status: 'absent' } },
+		})
 		const draft = buildDraftSession({
 			classId: 'c1',
 			students,
 			sessions: [],
 			ledger: [],
 			n: 2,
-			carryoverIdsOverride: base.carryoverIds,
-			baseSession: base,
-			resetMarks: true,
+			redrawFrom: base,
 			newId,
 		})
 		expect(draft.id).toBe('existing')
 		expect(draft.date).toBe('2026-01-05T09:00:00Z')
 		expect(draft.carryoverIds).toEqual(['a'])
 		expect(draft.marks).toEqual({})
+		expect(draft.createdAt).toBe(base.createdAt)
+		expect(draft.savedAt).toBe(base.savedAt)
+		expect(draft.carryoverIds?.every((id) => draft.picks.includes(id))).toBe(true)
+		expect(Object.keys(draft.marks).every((id) => draft.picks.includes(id))).toBe(true)
 	})
 
 	it('drops carryover overrides for students no longer on the roster', () => {
@@ -100,7 +106,7 @@ describe('buildDraftSession', () => {
 			sessions: [],
 			ledger: [],
 			n: 1,
-			carryoverIdsOverride: ['ghost', 'a'],
+			redrawFrom: session({ carryoverIds: ['ghost', 'a'] }),
 			newId,
 		})
 		expect(draft.carryoverIds).toEqual(['a'])

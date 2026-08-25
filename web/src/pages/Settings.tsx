@@ -6,7 +6,8 @@ import * as repo from '../data/repository'
 import { spreadsheetUrl, normalizeAndValidateSpreadsheetId } from '../services/sheetsClient'
 
 export default function Settings() {
-	const { ready, selectedClassId, selectedClass, busy, updateSettings, exportToSheets, previewImport, applyImport } = useStore()
+	const { ready, selectedClass, inFlight, updateSettings, exportToSheets, previewImport, applyImport } = useStore()
+	const classId = selectedClass?.id
 	const confirm = useConfirm()
 	const toast = useToast()
 
@@ -18,15 +19,15 @@ export default function Settings() {
 	const [lastExportedAt, setLastExportedAt] = useState<string | undefined>()
 
 	const load = useCallback(async () => {
-		if (!selectedClassId) return
-		const settings = await repo.getEffectiveSettings(selectedClassId)
+		if (!classId) return
+		const settings = await repo.getEffectiveSettings(classId)
 		setDefaultN(settings.defaultN)
 		setNeverSeenWeight(settings.neverSeenWeight)
 		setCooldownWeight(settings.cooldownWeight)
 		setLinkedSpreadsheetId(settings.spreadsheetId)
 		setSpreadsheetIdInput(settings.spreadsheetId ?? '')
 		setLastExportedAt(settings.lastExportedAt)
-	}, [selectedClassId])
+	}, [classId])
 
 	useEffect(() => {
 		load()
@@ -34,7 +35,7 @@ export default function Settings() {
 
 	if (!ready) return null
 
-	if (!selectedClassId) {
+	if (!classId) {
 		return (
 			<div className="page">
 				<div className="empty"><h3>No class selected</h3><p>Pick a class in the sidebar first.</p></div>
@@ -126,7 +127,7 @@ export default function Settings() {
 						<h2>Picking</h2>
 						<p className="desc">How students are drawn for each attendance check.</p>
 					</div>
-					<button className="btn btn-primary" onClick={handleSavePicking}>Save</button>
+					<button className="btn btn-primary" onClick={handleSavePicking} disabled={inFlight !== null}>Save</button>
 				</header>
 				<div className="row" style={{ gap: 24, alignItems: 'flex-start' }}>
 					<div className="field">
@@ -172,7 +173,7 @@ export default function Settings() {
 							value={spreadsheetIdInput}
 							onChange={(e) => setSpreadsheetIdInput(e.target.value)}
 						/>
-						<button className="btn" onClick={handleLinkSpreadsheet} disabled={!spreadsheetIdInput.trim() || spreadsheetIdInput.trim() === linkedSpreadsheetId}>
+						<button className="btn" onClick={handleLinkSpreadsheet} disabled={inFlight !== null || !spreadsheetIdInput.trim() || spreadsheetIdInput.trim() === linkedSpreadsheetId}>
 							Link
 						</button>
 						{linkedSpreadsheetId && (
@@ -191,11 +192,11 @@ export default function Settings() {
 				</div>
 
 				<div className="row">
-					<button className="btn btn-primary" onClick={handleExport} disabled={busy.export || busy.import}>
-						{busy.export ? 'Exporting…' : 'Export to sheet'}
+					<button className="btn btn-primary" onClick={handleExport} disabled={inFlight !== null}>
+						{inFlight === 'export' ? 'Exporting…' : 'Export to sheet'}
 					</button>
-					<button className="btn" onClick={handleImport} disabled={busy.export || busy.import || !linkedSpreadsheetId}>
-						{busy.import ? 'Importing…' : 'Import from sheet (overwrite local)'}
+					<button className="btn" onClick={handleImport} disabled={inFlight !== null || !linkedSpreadsheetId}>
+						{inFlight === 'import' ? 'Importing…' : 'Import from sheet (overwrite local)'}
 					</button>
 				</div>
 				<p className="faint">
