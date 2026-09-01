@@ -228,6 +228,18 @@ table.table { width: 100%; border-collapse: collapse; font-size: 14px; backgroun
 }
 .empty h3 { color: var(--text); }
 .empty p { font-size: 13.5px; max-width: 440px; line-height: 1.55; }
+.empty.roster-drop { transition: border-color 0.15s ease, background 0.15s ease; }
+.empty.roster-drop > * { pointer-events: none; }
+.empty.roster-drop.is-dragover {
+  border-color: var(--accent);
+  border-style: solid;
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.table-wrap.roster-drop { transition: box-shadow 0.15s ease; }
+.table-wrap.roster-drop.is-dragover {
+  box-shadow: 0 0 0 2px var(--accent);
+}
 
 /* ---------- Banner ---------- */
 

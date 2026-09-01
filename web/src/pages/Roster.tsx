@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import { useStore } from '../store'
 import { useToast } from '../components/Toast'
 import * as repo from '../data/repository'
 import { parseRosterCsv, toStudentEntities } from '../utils/csv'
+import { pickRosterCsv } from './rosterDrop'
 
 interface RosterEntry {
 	id: string
@@ -24,6 +25,8 @@ export default function Roster() {
 	const [sortKey, setSortKey] = useState<SortKey>('name')
 	const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
 	const [importing, setImporting] = useState(false)
+	const [dragOver, setDragOver] = useState(false)
+	const dragDepth = useRef(0)
 
 	const load = useCallback(async () => {
 		if (!classId) return
@@ -33,6 +36,11 @@ export default function Roster() {
 	useEffect(() => {
 		load()
 	}, [load])
+
+	useEffect(() => {
+		dragDepth.current = 0
+		setDragOver(false)
+	}, [classId])
 
 	if (!ready) return null
 
@@ -89,8 +97,57 @@ export default function Roster() {
 		}
 	}
 
+	const clearDrag = () => {
+		dragDepth.current = 0
+		setDragOver(false)
+	}
+
+	const handleDragEnter = (e: DragEvent) => {
+		e.preventDefault()
+		e.stopPropagation()
+		dragDepth.current += 1
+		setDragOver(true)
+	}
+
+	const handleDragOver = (e: DragEvent) => {
+		e.preventDefault()
+		e.stopPropagation()
+		if (e.dataTransfer) e.dataTransfer.dropEffect = importing ? 'none' : 'copy'
+	}
+
+	const handleDragLeave = (e: DragEvent) => {
+		e.preventDefault()
+		e.stopPropagation()
+		dragDepth.current = Math.max(0, dragDepth.current - 1)
+		if (dragDepth.current === 0) setDragOver(false)
+	}
+
+	const handleDrop = async (e: DragEvent) => {
+		e.preventDefault()
+		e.stopPropagation()
+		clearDrag()
+		if (importing) return
+		const picked = pickRosterCsv(e.dataTransfer.files)
+		if ('error' in picked) {
+			toast.error(picked.error)
+			return
+		}
+		await handleImport(picked.file)
+	}
+
+	const dropHandlers = {
+		onDragEnter: handleDragEnter,
+		onDragOver: handleDragOver,
+		onDragLeave: handleDragLeave,
+		onDrop: handleDrop,
+	}
+
 	return (
-		<div className="page">
+		<div
+			className="page"
+			onDragOver={(e) => e.preventDefault()}
+			onDrop={(e) => e.preventDefault()}
+		>
 			<div className="page-header">
 				<div>
 					<h1>Roster</h1>
@@ -116,16 +173,24 @@ export default function Roster() {
 			</div>
 
 			{students.length === 0 ? (
-				<div className="empty">
-					<h3>No students yet</h3>
+				<div
+					className={`empty roster-drop ${dragOver ? 'is-dragover' : ''}`}
+					aria-label="Drop roster CSV to import"
+					{...dropHandlers}
+				>
+					<h3>{dragOver ? 'Drop to import' : 'No students yet'}</h3>
 					<p>
-						Import a CSV with a header row. Recognized columns: <code>studentId</code>, <code>firstName</code>,{' '}
-						<code>lastName</code>, <code>displayName</code>, <code>loginId</code>, <code>sisId</code>. Missing IDs are
-						generated automatically; re-importing the same IDs updates existing students.
+						Drop a CSV here, or use Import roster CSV. Recognized columns: <code>studentId</code>,{' '}
+						<code>firstName</code>, <code>lastName</code>, <code>displayName</code>, <code>loginId</code>,{' '}
+						<code>sisId</code>. Missing IDs are generated automatically; re-importing the same IDs updates existing
+						students.
 					</p>
 				</div>
 			) : (
-				<div className="table-wrap">
+				<div
+					className={`table-wrap roster-drop ${dragOver ? 'is-dragover' : ''}`}
+					{...dropHandlers}
+				>
 					<table className="table">
 						<thead>
 							<tr>
