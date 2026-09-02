@@ -3,7 +3,7 @@ import type { SessionEntity } from './types'
 
 const repo = vi.hoisted(() => ({
 	listClasses: vi.fn(), getClass: vi.fn(), getEffectiveSettings: vi.fn(), createClass: vi.fn(),
-	deleteClassCascade: vi.fn(), getClassDataset: vi.fn(), saveSessionWithLedger: vi.fn(),
+	createClassFromDataset: vi.fn(), deleteClassCascade: vi.fn(), getClassDataset: vi.fn(), saveSessionWithLedger: vi.fn(),
 	updateSettings: vi.fn(), getSettings: vi.fn(), replaceClassData: vi.fn(),
 }))
 const sheets = vi.hoisted(() => ({ exportClassToSheet: vi.fn(), fetchClassTabs: vi.fn() }))
@@ -207,5 +207,85 @@ describe('exclusive operations', () => {
 		expect(JSON.parse(storage.getItem('checkpoint_draft_session_A')!)).toMatchObject({
 			id: 'same', marks: { 'student-1': { status: 'present' } },
 		})
+	})
+})
+
+describe('class files', () => {
+	it('exports the requested class with its saved draft', async () => {
+		storage.setItem('checkpoint_draft_session_A', JSON.stringify(draft('A')))
+		repo.getClassDataset.mockResolvedValue({
+			...dataset(),
+			settings: {
+				classId: 'A',
+				defaultN: 8,
+				neverSeenWeight: 3,
+				cooldownWeight: 0.25,
+				spreadsheetId: 'private-sheet',
+			},
+		})
+
+		const result = await useStore.getState().exportClassFile('A')
+
+		expect(result.ok).toBe(true)
+		if (!result.ok) return
+		const file = JSON.parse(result.value.json)
+		expect(result.value.filename).toMatch(/^checkpoint-class-a-\d{4}-\d{2}-\d{2}\.json$/)
+		expect(file.draftSession).toMatchObject({ id: 'draft-A', classId: 'A' })
+		expect(file.settings).toEqual({ defaultN: 8, neverSeenWeight: 3, cooldownWeight: 0.25 })
+		expect(file.settings).not.toHaveProperty('spreadsheetId')
+		expect(useStore.getState().inFlight).toBeNull()
+	})
+
+	it('imports a backup as a newly remapped and selected class', async () => {
+		const oldClass = cls('A')
+		let importedClass: ReturnType<typeof cls> | undefined
+		repo.createClassFromDataset.mockImplementation(async (data) => {
+			importedClass = data.class
+			return data.class
+		})
+		repo.listClasses.mockImplementation(async () => [oldClass, importedClass!])
+		repo.getClass.mockImplementation(async (id) => id === importedClass?.id ? importedClass : undefined)
+		repo.getEffectiveSettings.mockImplementation(async (id) => ({
+			classId: id, defaultN: 6, neverSeenWeight: 2, cooldownWeight: 0.5,
+		}))
+		useStore.setState({ classes: [oldClass], selectedClass: oldClass })
+		const json = JSON.stringify({
+			format: 'checkpoint-class',
+			version: 1,
+			exportedAt: '2026-09-02T12:00:00.000Z',
+			class: { id: 'source-class', name: 'Imported class' },
+			settings: { defaultN: 6, neverSeenWeight: 2, cooldownWeight: 0.5 },
+			students: [{ id: 'source-student', classId: 'source-class', displayName: 'Ada' }],
+			sessions: [],
+			ledger: [],
+			draftSession: {
+				id: 'source-draft',
+				classId: 'source-class',
+				date: '2026-09-02T12:00:00.000Z',
+				picks: ['source-student'],
+				marks: {},
+			},
+		})
+
+		const result = await useStore.getState().importClassFile(json)
+
+		expect(result.ok).toBe(true)
+		expect(repo.createClassFromDataset).toHaveBeenCalledOnce()
+		expect(repo.replaceClassData).not.toHaveBeenCalled()
+		const inserted = repo.createClassFromDataset.mock.calls[0][0]
+		expect(inserted.class.id).not.toBe('source-class')
+		expect(inserted.students[0].id).not.toBe('source-student')
+		expect(useStore.getState().classes).toHaveLength(2)
+		expect(useStore.getState().selectedClass?.id).toBe(inserted.class.id)
+		expect(JSON.parse(storage.getItem(`checkpoint_draft_session_${inserted.class.id}`)!)).toMatchObject({
+			classId: inserted.class.id,
+			picks: [inserted.students[0].id],
+		})
+	})
+
+	it('rejects invalid files before writing anything', async () => {
+		await expect(useStore.getState().importClassFile('{')).resolves.toMatchObject({ ok: false })
+		expect(repo.createClassFromDataset).not.toHaveBeenCalled()
+		expect(useStore.getState().inFlight).toBeNull()
 	})
 })

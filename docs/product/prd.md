@@ -32,7 +32,11 @@ Non-Goals (v1): Full SIS integration, seating charts, tardy tracking, parental n
 5. I can configure N and sampling weights per class (Settings page).
 6. I can export per-class absences to CSV (History page).
 7. I can optionally sync per-class data to Google Sheets and import from Sheets (Settings page; import overwrites local data for that class).
-8. As a teacher, I can delete a class so it no longer appears in the Home dropdown.
+8. I can download a complete JSON backup of one class and import it as a new class without changing existing classes.
+   - The backup contains the class name, roster, saved sessions and marks, absence ledger, picking settings, and any in-progress draft session.
+   - Import remaps all class, student, session, and ledger IDs so the same backup can safely be imported more than once.
+   - Linked Google Sheet IDs and export timestamps are intentionally not carried into the new class.
+9. As a teacher, I can delete a class so it no longer appears in the Home dropdown.
    - Deleting a class cascade-deletes all per-class local data: students, sessions, ledger, settings, and any saved draft session (`checkpoint_draft_session_<classId>`).
    - Deleting a class does not delete any remote Google Sheet; it only removes local linkage/settings.
 
@@ -75,6 +79,9 @@ Derived concepts:
 ## 7) Persistence
 - Default: Browser IndexedDB per class (Dexie DB name is `CheckPointDB`).
 - Draft sessions: The current (unsaved) session is auto-saved to `localStorage` under `checkpoint_draft_session_<classId>`.
+- Class file backup (manual): Home and Settings export a versioned `checkpoint-class` JSON snapshot. Home imports that snapshot as a new class after fail-closed structural and referential validation.
+  - Student, session, ledger, and draft references are remapped to new IDs during import.
+  - Absence counts and carryovers are not serialized separately; they are recomputed from the imported ledger and session marks.
 - CSV export (manual): History page exports a full per-class absence ledger to `absences_<classId>.csv` with columns `date,studentId,displayName,status,reason` where `status` is always `ABSENT`.
 - CSV output (optional): Settings lets the user select an output CSV file via the File System Access API; on Save, the app attempts to append absent rows for that session to that file.
 - Google Sheets sync (optional): Settings can export/import per-class data to a spreadsheet using Google Identity Services and the Sheets/Drive APIs.

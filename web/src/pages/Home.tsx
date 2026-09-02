@@ -5,6 +5,7 @@ import { useConfirm } from '../components/Dialog'
 import { useToast } from '../components/Toast'
 import * as repo from '../data/repository'
 import { computeCarryovers } from '../domain/attendance'
+import { downloadTextFile } from '../utils/csv'
 
 interface ClassStats {
 	students: number
@@ -15,7 +16,10 @@ interface ClassStats {
 }
 
 export default function Home() {
-	const { classes, selectedClass, selectClass, createClass, deleteClass, currentSession } = useStore()
+	const {
+		classes, selectedClass, selectClass, createClass, deleteClass, currentSession, inFlight,
+		exportClassFile, importClassFile,
+	} = useStore()
 	const classId = selectedClass?.id
 	const navigate = useNavigate()
 	const confirm = useConfirm()
@@ -72,6 +76,33 @@ export default function Home() {
 		else toast.error(result.error)
 	}
 
+	const handleExport = async (classId: string) => {
+		const result = await exportClassFile(classId)
+		if (!result.ok) {
+			toast.error(`Export failed: ${result.error}`)
+			return
+		}
+		downloadTextFile(result.value.json, result.value.filename, 'application/json;charset=utf-8;')
+		const { counts } = result.value
+		toast.success(`Exported ${counts.students} students, ${counts.sessions} sessions, and ${counts.ledger} absences.`)
+	}
+
+	const handleImport = async (file: File) => {
+		try {
+			const result = await importClassFile(await file.text())
+			if (!result.ok) {
+				toast.error(`Import failed: ${result.error}`)
+				return
+			}
+			const { className, counts } = result.value
+			toast.success(
+				`Imported "${className}" with ${counts.students} students, ${counts.sessions} sessions, and ${counts.ledger} absences.`,
+			)
+		} catch (error) {
+			toast.error(`Import failed: ${error instanceof Error ? error.message : String(error)}`)
+		}
+	}
+
 	return (
 		<div className="page">
 			<div className="page-header">
@@ -124,6 +155,19 @@ export default function Home() {
 						<h2>Classes</h2>
 						<p className="desc">Each class keeps its own roster, history, and settings.</p>
 					</div>
+					<label className={`btn file-label ${inFlight !== null ? 'disabled' : ''}`}>
+						{inFlight === 'import' ? 'Importing…' : 'Import class from file'}
+						<input
+							type="file"
+							accept=".json,application/json"
+							disabled={inFlight !== null}
+							onChange={(event) => {
+								const file = event.target.files?.[0]
+								event.target.value = ''
+								if (file) void handleImport(file)
+							}}
+						/>
+					</label>
 				</header>
 
 				{classes.length === 0 ? (
@@ -144,9 +188,12 @@ export default function Home() {
 										<td style={{ textAlign: 'right' }}>
 											<div className="row" style={{ justifyContent: 'flex-end' }}>
 												{c.id !== classId && (
-													<button className="btn btn-sm" onClick={() => selectClass(c.id)}>Switch to</button>
+													<button className="btn btn-sm" onClick={() => selectClass(c.id)} disabled={inFlight !== null}>Switch to</button>
 												)}
-												<button className="btn btn-sm btn-danger" onClick={() => handleDelete(c.id, c.name)}>
+												<button className="btn btn-sm" onClick={() => void handleExport(c.id)} disabled={inFlight !== null}>
+													Export
+												</button>
+												<button className="btn btn-sm btn-danger" onClick={() => handleDelete(c.id, c.name)} disabled={inFlight !== null}>
 													Delete
 												</button>
 											</div>
@@ -167,7 +214,7 @@ export default function Home() {
 						onChange={(e) => setNewClassName(e.target.value)}
 						onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
 					/>
-					<button className="btn" onClick={handleCreate} disabled={!newClassName.trim()}>
+					<button className="btn" onClick={handleCreate} disabled={!newClassName.trim() || inFlight !== null}>
 						Create class
 					</button>
 				</div>

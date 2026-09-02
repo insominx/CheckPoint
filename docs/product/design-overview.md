@@ -50,6 +50,10 @@
 - Auto-generates stable UUIDs for students missing IDs
 - Roster import is **fail-closed** for identity safety: imports are blocked if `studentId` duplicates exist in the CSV or if a `studentId` would collide with an existing student in a different class (current local storage keys students by `id`).
 - Per-class absence CSV export for external record-keeping
+- Versioned per-class JSON backup containing the roster, sessions and marks, absence ledger, picking settings, and any draft session
+  - Import always creates a new class and remaps every entity ID/reference, leaving existing classes unchanged
+  - Files are validated before the atomic IndexedDB insert; invalid or unsupported files do not create partial classes
+  - Google Sheet linkage is intentionally excluded, while derived counts and carryovers are recomputed after import
 - Optional Google Sheets integration for cloud backup
 
 ---
@@ -73,10 +77,10 @@
 
 | Page | Purpose |
 |------|---------|
-| **Home** | Class selection, create new class, launch "Pick Students" |
+| **Home** | Class selection, create/import/export classes, launch "Pick Students" |
 | **Session** | Active attendance check—display student cards, mark present/absent, save |
 | **History** | View past sessions, export absences CSV, delete sessions, correct past marks |
-| **Settings** | Configure N (sample size), weight multipliers, CSV output file, Google Sheets sync |
+| **Settings** | Configure N (sample size), export a class file, and manage Google Sheets sync |
 | **Roster** | View roster with derived absence counts (sortable), import CSV |
 
 ---

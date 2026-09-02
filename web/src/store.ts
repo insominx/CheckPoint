@@ -8,6 +8,7 @@ import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 import * as repo from './data/repository'
 import { buildDraftSession, DEFAULT_N } from './domain/sessionDraft'
+import { buildClassFile, classFileName, parseClassFile, remapClassFile } from './domain/classFile'
 import { parseSheetExport, type ParsedImport } from './domain/sheetImport'
 import { exportClassToSheet, fetchClassTabs, type ExportSummary } from './services/sheetsSync'
 import { getAccessToken, normalizeAndValidateSpreadsheetId, SHEETS_AND_DRIVE_SCOPES } from './services/sheetsClient'
@@ -25,6 +26,17 @@ export interface ImportPreview {
 	classId: string
 	spreadsheetId: string
 	parsed: ParsedImport
+}
+
+export interface ClassFileSummary {
+	classId: string
+	className: string
+	counts: { students: number; sessions: number; ledger: number }
+}
+
+export interface ClassFileExport extends ClassFileSummary {
+	filename: string
+	json: string
 }
 
 interface PickOptions {
@@ -58,6 +70,8 @@ interface StoreState {
 
 	updateSettings: (updates: { defaultN?: number; neverSeenWeight?: number; cooldownWeight?: number; spreadsheetId?: string }) => Promise<ActionResult>
 
+	exportClassFile: (classId: string) => Promise<ActionResult<ClassFileExport>>
+	importClassFile: (json: string) => Promise<ActionResult<ClassFileSummary>>
 	exportToSheets: () => Promise<ActionResult<ExportSummary>>
 	previewImport: () => Promise<ActionResult<ImportPreview>>
 	applyImport: (preview: ImportPreview) => Promise<ActionResult>
@@ -255,6 +269,72 @@ export const useStore = create<StoreState>((set, get) => {
 				return ok(undefined)
 			} catch (e) {
 				return fail(e)
+			}
+		},
+
+		async exportClassFile(classId) {
+			if (!acquire('export')) return { ok: false, error: 'Another operation is already in progress.' }
+			try {
+				const dataset = await repo.getClassDataset(classId)
+				if (!dataset.cls) return { ok: false, error: 'Class not found.' }
+				const draft = readDraft(classId)
+				const file = buildClassFile({
+					cls: dataset.cls,
+					settings: dataset.settings,
+					students: dataset.students,
+					sessions: dataset.sessions,
+					ledger: dataset.ledger,
+				}, draft)
+				return ok({
+					classId,
+					className: dataset.cls.name,
+					counts: {
+						students: dataset.students.length,
+						sessions: dataset.sessions.length,
+						ledger: dataset.ledger.length,
+					},
+					filename: classFileName(dataset.cls.name, file.exportedAt),
+					json: JSON.stringify(file, null, 2),
+				})
+			} catch (e) {
+				return fail(e)
+			} finally {
+				release('export')
+			}
+		},
+
+		async importClassFile(json) {
+			if (!acquire('import')) return { ok: false, error: 'Another operation is already in progress.' }
+			try {
+				const parsed = parseClassFile(json)
+				if (!parsed.ok) return { ok: false, error: parsed.error }
+				const remapped = remapClassFile(parsed.data, uuidv4)
+				await repo.createClassFromDataset({
+					class: remapped.class,
+					settings: remapped.settings,
+					students: remapped.students,
+					sessions: remapped.sessions,
+					ledger: remapped.ledger,
+				})
+				if (remapped.draftSession) {
+					localStorage.setItem(draftKey(remapped.class.id), JSON.stringify(remapped.draftSession))
+				}
+				await get().refreshClasses()
+				release('import')
+				await get().selectClass(remapped.class.id)
+				return ok({
+					classId: remapped.class.id,
+					className: remapped.class.name,
+					counts: {
+						students: remapped.students.length,
+						sessions: remapped.sessions.length,
+						ledger: remapped.ledger.length,
+					},
+				})
+			} catch (e) {
+				return fail(e)
+			} finally {
+				release('import')
 			}
 		},
 

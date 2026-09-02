@@ -294,6 +294,7 @@ table.table { width: 100%; border-collapse: collapse; font-size: 14px; backgroun
 .divider { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
 
 .file-label input[type='file'] { display: none; }
+.file-label.disabled { opacity: 0.45; cursor: not-allowed; }
 
 @media (max-width: 860px) {
   .app { grid-template-columns: 1fr; }

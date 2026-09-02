@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useStore } from '../store'
 import { useConfirm } from '../components/Dialog'
 import { useToast } from '../components/Toast'
 import * as repo from '../data/repository'
 import { spreadsheetUrl, normalizeAndValidateSpreadsheetId } from '../services/sheetsClient'
+import { downloadTextFile } from '../utils/csv'
 
 export default function Settings() {
-	const { ready, selectedClass, inFlight, updateSettings, exportToSheets, previewImport, applyImport } = useStore()
+	const {
+		ready, selectedClass, inFlight, updateSettings, exportClassFile,
+		exportToSheets, previewImport, applyImport,
+	} = useStore()
 	const classId = selectedClass?.id
 	const confirm = useConfirm()
 	const toast = useToast()
@@ -86,6 +91,18 @@ export default function Settings() {
 		}
 	}
 
+	const handleFileExport = async () => {
+		if (!classId) return
+		const result = await exportClassFile(classId)
+		if (!result.ok) {
+			toast.error(`Export failed: ${result.error}`)
+			return
+		}
+		downloadTextFile(result.value.json, result.value.filename, 'application/json;charset=utf-8;')
+		const { counts } = result.value
+		toast.success(`Exported ${counts.students} students, ${counts.sessions} sessions, and ${counts.ledger} absences.`)
+	}
+
 	const handleImport = async () => {
 		const preview = await previewImport()
 		if (!preview.ok) {
@@ -149,6 +166,24 @@ export default function Settings() {
 						<span className="hint">Weight multiplier for students picked in both of the last two sessions.</span>
 					</div>
 				</div>
+			</section>
+
+			<section className="panel">
+				<header>
+					<div>
+						<h2>Class file</h2>
+						<p className="desc">
+							Download a complete backup of this class, including its roster, history, settings, and any in-progress session.
+						</p>
+					</div>
+				</header>
+				<div className="row">
+					<button className="btn btn-primary" onClick={handleFileExport} disabled={inFlight !== null}>
+						{inFlight === 'export' ? 'Exporting…' : 'Export class file'}
+					</button>
+					<Link className="btn" to="/">Import a class file on Home</Link>
+				</div>
+				<p className="faint">Importing a class file always creates a new class and leaves existing classes unchanged.</p>
 			</section>
 
 			<section className="panel">

@@ -2,6 +2,18 @@ import Papa from 'papaparse'
 import type { ParseResult } from 'papaparse'
 import type { AbsenceLedgerItem, StudentEntity } from '../types'
 
+export function downloadTextFile(contents: string, filename: string, type: string) {
+	const blob = new Blob([contents], { type })
+	const url = URL.createObjectURL(blob)
+	const a = document.createElement('a')
+	a.href = url
+	a.download = filename
+	document.body.appendChild(a)
+	a.click()
+	document.body.removeChild(a)
+	URL.revokeObjectURL(url)
+}
+
 export function exportAbsencesCsv(
 	classId: string,
 	items: AbsenceLedgerItem[],
@@ -15,15 +27,7 @@ export function exportAbsencesCsv(
 		reason: a.reason ?? '',
 	}))
 	const csv = Papa.unparse(rows, { header: true })
-	const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-	const url = URL.createObjectURL(blob)
-	const a = document.createElement('a')
-	a.href = url
-	a.download = `absences_${classId}.csv`
-	document.body.appendChild(a)
-	a.click()
-	document.body.removeChild(a)
-	URL.revokeObjectURL(url)
+	downloadTextFile(csv, `absences_${classId}.csv`, 'text/csv;charset=utf-8;')
 }
 
 export interface RosterRow {

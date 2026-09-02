@@ -32,6 +32,32 @@ export async function createClass(name: string): Promise<ClassEntity> {
 	return cls
 }
 
+export interface NewClassDataset {
+	class: ClassEntity
+	settings: PerClassSettings
+	students: StudentEntity[]
+	sessions: SessionEntity[]
+	ledger: AbsenceLedgerItem[]
+}
+
+/** Atomically inserts a complete, already-remapped class dataset. */
+export async function createClassFromDataset(data: NewClassDataset): Promise<ClassEntity> {
+	const classId = data.class.id
+	await db.transaction('rw', [db.classes, db.settings, db.students, db.sessions, db.ledger], async () => {
+		await db.classes.add(data.class)
+		await db.settings.add({
+			classId,
+			defaultN: data.settings.defaultN ?? DEFAULT_N,
+			neverSeenWeight: data.settings.neverSeenWeight ?? DEFAULT_NEVER_SEEN_WEIGHT,
+			cooldownWeight: data.settings.cooldownWeight ?? DEFAULT_COOLDOWN_WEIGHT,
+		})
+		if (data.students.length) await db.students.bulkAdd(data.students)
+		if (data.sessions.length) await db.sessions.bulkAdd(data.sessions)
+		if (data.ledger.length) await db.ledger.bulkAdd(data.ledger)
+	})
+	return data.class
+}
+
 /** Hard-deletes the class and every piece of local data scoped to it. */
 export async function deleteClassCascade(classId: string): Promise<void> {
 	await db.transaction('rw', [db.classes, db.students, db.sessions, db.ledger, db.settings], async () => {
