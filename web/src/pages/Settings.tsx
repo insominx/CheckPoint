@@ -115,7 +115,8 @@ export default function Settings() {
 			message:
 				`The sheet contains ${reports.students.total} students, ${reports.sessions.total} sessions, ` +
 				`${reports.marks.total} marks, and ${reports.ledger.total} absence records.\n\n` +
-				`All current local data for "${selectedClass?.name}" will be replaced. This cannot be undone.`,
+				`All current local data for "${selectedClass?.name}" will be replaced. This cannot be undone.\n\n` +
+				`Students you removed locally will come back if they are still on the sheet.`,
 			confirmLabel: 'Overwrite local data',
 			danger: true,
 		})

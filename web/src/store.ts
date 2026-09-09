@@ -8,6 +8,7 @@ import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 import * as repo from './data/repository'
 import { buildDraftSession, DEFAULT_N } from './domain/sessionDraft'
+import { eraseStudentFromRecords } from './domain/studentRemoval'
 import { buildClassFile, classFileName, parseClassFile, remapClassFile } from './domain/classFile'
 import { parseSheetExport, type ParsedImport } from './domain/sheetImport'
 import { exportClassToSheet, fetchClassTabs, type ExportSummary } from './services/sheetsSync'
@@ -44,7 +45,7 @@ interface PickOptions {
 	redrawFrom?: SessionEntity
 }
 
-export type BusyKey = 'pick' | 'save' | 'export' | 'import'
+export type BusyKey = 'pick' | 'save' | 'export' | 'import' | 'remove'
 
 interface StoreState {
 	/** True once init() has restored persisted selection; pages wait on this before redirecting. */
@@ -61,6 +62,7 @@ interface StoreState {
 	createClass: (name: string) => Promise<ActionResult<ClassEntity>>
 	selectClass: (classId: string | undefined) => Promise<void>
 	deleteClass: (classId: string) => Promise<ActionResult>
+	removeStudent: (classId: string, studentId: string) => Promise<ActionResult>
 
 	pickStudents: (opts?: PickOptions) => Promise<PickStatus>
 	redrawRandom: (opts?: { allowResetMarks?: boolean }) => Promise<RedrawStatus>
@@ -175,6 +177,39 @@ export const useStore = create<StoreState>((set, get) => {
 				return ok(undefined)
 			} catch (e) {
 				return fail(e)
+			}
+		},
+
+		async removeStudent(classId, studentId) {
+			if (!acquire('remove')) return { ok: false, error: 'Another operation is already in progress.' }
+			const scrubDraft = () => {
+				const current = get().currentSession
+				const source = current?.classId === classId ? current : readDraft(classId)
+				if (!source) return
+				const plan = eraseStudentFromRecords(studentId, [source], [])
+				const next = plan.sessionIdsToDelete.includes(source.id)
+					? undefined
+					: (plan.sessionsToPut[0] ?? source)
+				if (!next) {
+					localStorage.removeItem(draftKey(classId))
+					if (current?.classId === classId) set({ currentSession: undefined })
+				} else {
+					localStorage.setItem(draftKey(classId), JSON.stringify(next))
+					if (current?.classId === classId) set({ currentSession: next })
+				}
+			}
+			try {
+				await repo.removeStudentCascade(classId, studentId)
+				scrubDraft()
+				return ok(undefined)
+			} catch (e) {
+				if (e instanceof Error && e.message === 'That student is not on this class roster.') {
+					scrubDraft()
+					return ok(undefined)
+				}
+				return fail(e)
+			} finally {
+				release('remove')
 			}
 		},
 

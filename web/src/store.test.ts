@@ -3,7 +3,7 @@ import type { SessionEntity } from './types'
 
 const repo = vi.hoisted(() => ({
 	listClasses: vi.fn(), getClass: vi.fn(), getEffectiveSettings: vi.fn(), createClass: vi.fn(),
-	createClassFromDataset: vi.fn(), deleteClassCascade: vi.fn(), getClassDataset: vi.fn(), saveSessionWithLedger: vi.fn(),
+	createClassFromDataset: vi.fn(), deleteClassCascade: vi.fn(), removeStudentCascade: vi.fn(), getClassDataset: vi.fn(), saveSessionWithLedger: vi.fn(),
 	updateSettings: vi.fn(), getSettings: vi.fn(), replaceClassData: vi.fn(),
 }))
 const sheets = vi.hoisted(() => ({ exportClassToSheet: vi.fn(), fetchClassTabs: vi.fn() }))
@@ -206,6 +206,164 @@ describe('exclusive operations', () => {
 		expect(useStore.getState().currentSession).toMatchObject({ id: 'same', marks: { 'student-1': { status: 'present' } } })
 		expect(JSON.parse(storage.getItem('checkpoint_draft_session_A')!)).toMatchObject({
 			id: 'same', marks: { 'student-1': { status: 'present' } },
+		})
+	})
+})
+
+describe('remove student', () => {
+	it('rejects removal before any side effect while an operation is in flight', async () => {
+		storage.setItem('checkpoint_draft_session_A', JSON.stringify(draft('A', 'draft-A')))
+		useStore.setState({
+			selectedClass: cls('A'),
+			currentSession: draft('A', 'draft-A'),
+			inFlight: 'save',
+		})
+
+		await expect(useStore.getState().removeStudent('A', 'stu-1')).resolves.toEqual({
+			ok: false, error: 'Another operation is already in progress.',
+		})
+
+		expect(repo.removeStudentCascade).not.toHaveBeenCalled()
+		expect(useStore.getState().currentSession?.id).toBe('draft-A')
+	})
+
+	it('scrubs the live draft and keeps remaining picks', async () => {
+		repo.removeStudentCascade.mockResolvedValue(undefined)
+		const current = draft('A', 'draft-A')
+		current.picks = ['stu-1', 'stu-2']
+		current.carryoverIds = ['stu-1']
+		current.marks = { 'stu-1': { status: 'absent' }, 'stu-2': { status: 'present' } }
+		storage.setItem('checkpoint_draft_session_A', JSON.stringify(current))
+		useStore.setState({ selectedClass: cls('A'), currentSession: current })
+
+		await expect(useStore.getState().removeStudent('A', 'stu-1')).resolves.toEqual({
+			ok: true, value: undefined,
+		})
+
+		expect(repo.removeStudentCascade).toHaveBeenCalledWith('A', 'stu-1')
+		const scrubbed = {
+			id: 'draft-A',
+			picks: ['stu-2'],
+			carryoverIds: [],
+			marks: { 'stu-2': { status: 'present' } },
+		}
+		expect(useStore.getState().currentSession).toMatchObject(scrubbed)
+		expect(JSON.parse(storage.getItem('checkpoint_draft_session_A')!)).toMatchObject(scrubbed)
+		expect(useStore.getState().inFlight).toBeNull()
+	})
+
+	it('discards the live draft when the removed student was the only pick', async () => {
+		repo.removeStudentCascade.mockResolvedValue(undefined)
+		const current = draft('A', 'draft-A')
+		current.picks = ['stu-1']
+		current.marks = { 'stu-1': { status: 'present' } }
+		storage.setItem('checkpoint_draft_session_A', JSON.stringify(current))
+		useStore.setState({ selectedClass: cls('A'), currentSession: current })
+
+		await expect(useStore.getState().removeStudent('A', 'stu-1')).resolves.toEqual({
+			ok: true, value: undefined,
+		})
+
+		expect(useStore.getState().currentSession).toBeUndefined()
+		expect(storage.getItem('checkpoint_draft_session_A')).toBeNull()
+		expect(useStore.getState().inFlight).toBeNull()
+	})
+
+	it('leaves another class draft untouched', async () => {
+		repo.removeStudentCascade.mockResolvedValue(undefined)
+		const current = draft('B', 'draft-B')
+		current.picks = ['stu-1']
+		useStore.setState({ selectedClass: cls('A'), currentSession: current })
+
+		await expect(useStore.getState().removeStudent('A', 'stu-1')).resolves.toEqual({
+			ok: true, value: undefined,
+		})
+
+		expect(useStore.getState().currentSession).toEqual(current)
+	})
+
+	it('heals the leftover draft when the student is already gone', async () => {
+		repo.removeStudentCascade.mockRejectedValue(new Error('That student is not on this class roster.'))
+		const current = draft('A', 'draft-A')
+		current.picks = ['stu-1', 'stu-2']
+		current.carryoverIds = ['stu-1']
+		current.marks = { 'stu-1': { status: 'absent' }, 'stu-2': { status: 'present' } }
+		storage.setItem('checkpoint_draft_session_A', JSON.stringify(current))
+		useStore.setState({ selectedClass: cls('A'), currentSession: current })
+
+		await expect(useStore.getState().removeStudent('A', 'stu-1')).resolves.toEqual({
+			ok: true, value: undefined,
+		})
+
+		const scrubbed = {
+			id: 'draft-A',
+			picks: ['stu-2'],
+			carryoverIds: [],
+			marks: { 'stu-2': { status: 'present' } },
+		}
+		expect(useStore.getState().currentSession).toMatchObject(scrubbed)
+		expect(JSON.parse(storage.getItem('checkpoint_draft_session_A')!)).toMatchObject(scrubbed)
+		expect(useStore.getState().inFlight).toBeNull()
+	})
+
+	it('leaves the live draft unchanged when the cascade throws an unexpected error', async () => {
+		repo.removeStudentCascade.mockRejectedValue(new Error('IndexedDB is unavailable.'))
+		const current = draft('A', 'draft-A')
+		current.picks = ['stu-1', 'stu-2']
+		storage.setItem('checkpoint_draft_session_A', JSON.stringify(current))
+		useStore.setState({ selectedClass: cls('A'), currentSession: current })
+
+		await expect(useStore.getState().removeStudent('A', 'stu-1')).resolves.toEqual({
+			ok: false, error: 'IndexedDB is unavailable.',
+		})
+
+		expect(useStore.getState().currentSession).toEqual(current)
+		expect(JSON.parse(storage.getItem('checkpoint_draft_session_A')!)).toEqual(current)
+		expect(useStore.getState().inFlight).toBeNull()
+	})
+
+	it('blocks save and class switching until remove releases', async () => {
+		const pending = deferred<void>()
+		repo.removeStudentCascade.mockReturnValue(pending.promise)
+		const current = draft('A', 'draft-A')
+		current.picks = ['stu-1', 'stu-2']
+		useStore.setState({ selectedClass: cls('A'), currentSession: current })
+
+		const removing = useStore.getState().removeStudent('A', 'stu-1')
+		expect(useStore.getState().inFlight).toBe('remove')
+		await expect(useStore.getState().saveSession()).resolves.toEqual({
+			ok: false, error: 'Another operation is already in progress.',
+		})
+		await useStore.getState().selectClass('B')
+		expect(useStore.getState().selectedClass?.id).toBe('A')
+		expect(repo.saveSessionWithLedger).not.toHaveBeenCalled()
+
+		pending.resolve()
+		await expect(removing).resolves.toEqual({ ok: true, value: undefined })
+		expect(useStore.getState().inFlight).toBeNull()
+	})
+
+	it('scrubs the persisted draft when the live session belongs to another class', async () => {
+		repo.removeStudentCascade.mockResolvedValue(undefined)
+		const stored = draft('A', 'draft-A')
+		stored.picks = ['stu-1', 'stu-2']
+		stored.carryoverIds = ['stu-1']
+		stored.marks = { 'stu-1': { status: 'absent' }, 'stu-2': { status: 'present' } }
+		const live = draft('B', 'draft-B')
+		live.picks = ['stu-1']
+		storage.setItem('checkpoint_draft_session_A', JSON.stringify(stored))
+		useStore.setState({ selectedClass: cls('B'), currentSession: live })
+
+		await expect(useStore.getState().removeStudent('A', 'stu-1')).resolves.toEqual({
+			ok: true, value: undefined,
+		})
+
+		expect(useStore.getState().currentSession).toEqual(live)
+		expect(JSON.parse(storage.getItem('checkpoint_draft_session_A')!)).toMatchObject({
+			id: 'draft-A',
+			picks: ['stu-2'],
+			carryoverIds: [],
+			marks: { 'stu-2': { status: 'present' } },
 		})
 	})
 })

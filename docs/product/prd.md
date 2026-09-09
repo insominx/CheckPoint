@@ -39,6 +39,12 @@ Non-Goals (v1): Full SIS integration, seating charts, tardy tracking, parental n
 9. As a teacher, I can delete a class so it no longer appears in the Home dropdown.
    - Deleting a class cascade-deletes all per-class local data: students, sessions, ledger, settings, and any saved draft session (`checkpoint_draft_session_<classId>`).
    - Deleting a class does not delete any remote Google Sheet; it only removes local linkage/settings.
+10. As a teacher, I can remove a student who dropped the class from the roster.
+   - Removal hard-deletes the student and scrubs them from saved sessions, the absence ledger, and any in-progress draft.
+   - Saved sessions that have no remaining picks after the scrub are deleted.
+   - There is no archive or undo. Re-importing a later CSV that still contains their ID adds them back as a new enrollment with no history.
+   - A linked Google Sheet is not updated until the next export. Importing that sheet before exporting restores them with their old history.
+   - Saving a stale draft (for example from another tab) drops any pick that is no longer on the roster. If no enrolled picks remain, the save fails and nothing is written.
 
 ## 5) Selection Algorithm (current implementation)
 Let (scoped per class):
@@ -134,6 +140,7 @@ History:
 Roster:
 - Import roster CSV for the current class.
 - View roster with derived absence counts (sortable).
+- Remove a dropped student (confirm first). This permanently deletes the student and their past attendance for the class.
 
 Settings:
 - Default N and sampling weights (`neverSeenWeight`, `cooldownWeight`).
@@ -145,10 +152,11 @@ Settings:
 - No eligible students (everyone has been absent at least once): show carryovers only; random draw is empty.
 - Student absent repeatedly: remains carryover across sessions until marked present in a later session.
 - Student moves classes: no built-in transfer; history does not cross classes.
+- Student drops the class: remove them from the Roster. They disappear from future picks, History, and absence export. The current draft is stripped (or discarded if they were the only pick). A later CSV import with the same ID recreates them without old records. Importing an unexported Google Sheet restores them with history. Save drops unknown roster IDs from a stale draft.
 
 ## 11) Performance & Reliability
 - Offline-first PWA. Core attendance actions work without network.
-- Writes are atomic via Dexie transactions; the absence ledger is append-only except when correcting past marks.
+- Writes are atomic via Dexie transactions; the absence ledger is append-only except when correcting past marks or removing a dropped student.
 
 ## 12) Privacy & Compliance
 - Store minimal PII (name + local ID). All data stays local unless the user enables sync.

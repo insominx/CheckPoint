@@ -7,6 +7,7 @@ import { db } from './db'
 import type { AbsenceLedgerItem, AbsenceReason, ClassEntity, Mark, PerClassSettings, SessionEntity, StudentEntity } from '../types'
 import { DEFAULT_COOLDOWN_WEIGHT, DEFAULT_N, DEFAULT_NEVER_SEEN_WEIGHT } from '../domain/sessionDraft'
 import { countAbsencesByStudent } from '../domain/attendance'
+import { eraseStudentFromRecords, keepEnrolledInSession } from '../domain/studentRemoval'
 
 // ---------- Classes ----------
 
@@ -104,6 +105,28 @@ export async function importRosterStudents(classId: string, entities: StudentEnt
 	return entities.length
 }
 
+/**
+ * Hard-deletes a student and scrubs them from saved sessions and the ledger.
+ * Fails closed if the student is missing or belongs to a different class.
+ */
+export async function removeStudentCascade(classId: string, studentId: string): Promise<void> {
+	await db.transaction('rw', [db.students, db.sessions, db.ledger], async () => {
+		const student = await db.students.get(studentId)
+		if (!student || student.classId !== classId) {
+			throw new Error('That student is not on this class roster.')
+		}
+		const [sessions, ledger] = await Promise.all([
+			db.sessions.where('classId').equals(classId).toArray(),
+			db.ledger.where('classId').equals(classId).toArray(),
+		])
+		const plan = eraseStudentFromRecords(studentId, sessions, ledger)
+		await db.students.delete(studentId)
+		if (plan.sessionIdsToDelete.length) await db.sessions.bulkDelete(plan.sessionIdsToDelete)
+		if (plan.sessionsToPut.length) await db.sessions.bulkPut(plan.sessionsToPut)
+		if (plan.ledgerIdsToDelete.length) await db.ledger.bulkDelete(plan.ledgerIdsToDelete)
+	})
+}
+
 // ---------- Sessions / marks / ledger ----------
 
 export async function getSessions(classId: string): Promise<SessionEntity[]> {
@@ -133,16 +156,19 @@ export async function getClassDataset(classId: string) {
 
 /** Persists a finalized session and appends one ledger entry per absent mark. */
 export async function saveSessionWithLedger(session: SessionEntity): Promise<void> {
-	await db.transaction('rw', db.sessions, db.ledger, async () => {
-		await db.sessions.add(session)
-		const absentEntries: AbsenceLedgerItem[] = Object.entries(session.marks)
+	await db.transaction('rw', [db.sessions, db.ledger, db.students], async () => {
+		const rosterIds = await db.students.where('classId').equals(session.classId).primaryKeys()
+		const restricted = keepEnrolledInSession(session, rosterIds)
+		if (!restricted) throw new Error('No students left to save.')
+		await db.sessions.add(restricted)
+		const absentEntries: AbsenceLedgerItem[] = Object.entries(restricted.marks)
 			.filter(([, mark]) => mark.status === 'absent')
 			.map(([studentId, mark]) => ({
 				id: uuidv4(),
-				classId: session.classId,
+				classId: restricted.classId,
 				studentId,
-				date: session.date,
-				sessionId: session.id,
+				date: restricted.date,
+				sessionId: restricted.id,
 				reason: mark.reason,
 			}))
 		if (absentEntries.length) await db.ledger.bulkAdd(absentEntries)

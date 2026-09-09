@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import { useStore } from '../store'
+import { useConfirm } from '../components/Dialog'
 import { useToast } from '../components/Toast'
 import * as repo from '../data/repository'
 import { parseRosterCsv, toStudentEntities } from '../utils/csv'
@@ -18,13 +19,16 @@ interface RosterEntry {
 type SortKey = 'name' | 'last' | 'absences'
 
 export default function Roster() {
-	const { ready, selectedClass } = useStore()
+	const { ready, selectedClass, inFlight, removeStudent } = useStore()
 	const classId = selectedClass?.id
 	const toast = useToast()
+	const confirm = useConfirm()
 	const [students, setStudents] = useState<RosterEntry[]>([])
 	const [sortKey, setSortKey] = useState<SortKey>('name')
 	const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
 	const [importing, setImporting] = useState(false)
+	const [actionLock, setActionLock] = useState(false)
+	const [removingId, setRemovingId] = useState<string | null>(null)
 	const [dragOver, setDragOver] = useState(false)
 	const dragDepth = useRef(0)
 
@@ -70,7 +74,36 @@ export default function Roster() {
 
 	const arrow = (key: SortKey) => (sortKey === key ? (sortDir === 'asc' ? ' ↑' : ' ↓') : '')
 
+	const busy = importing || inFlight !== null || actionLock
+
+	const handleRemove = async (student: RosterEntry) => {
+		if (!classId || busy) return
+		setActionLock(true)
+		try {
+			const proceed = await confirm({
+				title: `Remove ${student.displayName}?`,
+				message:
+					`This permanently deletes ${student.displayName} from the roster and erases their past attendance for this class.\n\nA later CSV import with the same ID adds them back with no history. A linked Google Sheet (if any) is not updated until you export again.`,
+				confirmLabel: 'Remove student',
+				danger: true,
+			})
+			if (!proceed) return
+			setRemovingId(student.id)
+			const result = await removeStudent(classId, student.id)
+			if (!result.ok) {
+				toast.error(result.error)
+				return
+			}
+			toast.success(`Removed ${student.displayName}.`)
+			await load()
+		} finally {
+			setRemovingId(null)
+			setActionLock(false)
+		}
+	}
+
 	const handleImport = async (file: File) => {
+		if (busy) return
 		setImporting(true)
 		try {
 			const rows = await parseRosterCsv(file)
@@ -112,7 +145,7 @@ export default function Roster() {
 	const handleDragOver = (e: DragEvent) => {
 		e.preventDefault()
 		e.stopPropagation()
-		if (e.dataTransfer) e.dataTransfer.dropEffect = importing ? 'none' : 'copy'
+		if (e.dataTransfer) e.dataTransfer.dropEffect = busy ? 'none' : 'copy'
 	}
 
 	const handleDragLeave = (e: DragEvent) => {
@@ -126,7 +159,7 @@ export default function Roster() {
 		e.preventDefault()
 		e.stopPropagation()
 		clearDrag()
-		if (importing) return
+		if (busy) return
 		const picked = pickRosterCsv(e.dataTransfer.files)
 		if ('error' in picked) {
 			toast.error(picked.error)
@@ -156,12 +189,12 @@ export default function Roster() {
 					</p>
 				</div>
 				<div className="page-actions">
-					<label className={`btn btn-primary file-label ${importing ? 'disabled' : ''}`}>
+					<label className={`btn btn-primary file-label ${busy ? 'disabled' : ''}`}>
 						{importing ? 'Importing…' : 'Import roster CSV'}
 						<input
 							type="file"
 							accept=".csv"
-							disabled={importing}
+							disabled={busy}
 							onChange={async (e) => {
 								const file = e.target.files?.[0]
 								e.target.value = ''
@@ -183,7 +216,7 @@ export default function Roster() {
 						Drop a CSV here, or use Import roster CSV. Recognized columns: <code>studentId</code>,{' '}
 						<code>firstName</code>, <code>lastName</code>, <code>displayName</code>, <code>loginId</code>,{' '}
 						<code>sisId</code>. Missing IDs are generated automatically; re-importing the same IDs updates existing
-						students.
+						students. Previously removed IDs come back with no history.
 					</p>
 				</div>
 			) : (
@@ -198,6 +231,7 @@ export default function Roster() {
 								<th className="sortable" onClick={() => toggleSort('last')}>Last name{arrow('last')}</th>
 								<th>Login</th>
 								<th className="sortable num" onClick={() => toggleSort('absences')}>Absences{arrow('absences')}</th>
+								<th style={{ width: 100 }} />
 							</tr>
 						</thead>
 						<tbody>
@@ -213,6 +247,15 @@ export default function Roster() {
 											<span className="badge badge-muted">0</span>
 										)}
 									</td>
+									<td style={{ textAlign: 'right' }}>
+										<button
+											className="btn btn-sm btn-danger"
+											disabled={busy}
+											onClick={() => void handleRemove(s)}
+										>
+											{removingId === s.id ? 'Removing…' : 'Remove'}
+										</button>
+									</td>
 								</tr>
 							))}
 						</tbody>
@@ -221,7 +264,10 @@ export default function Roster() {
 			)}
 
 			{students.length > 0 && (
-				<p className="faint">To correct a recorded absence, open the session on the History page.</p>
+				<p className="faint">
+					Importing a CSV adds or updates students by ID. Previously removed students in the file come back with no history.
+					To correct a recorded absence, open the session on the History page.
+				</p>
 			)}
 		</div>
 	)
