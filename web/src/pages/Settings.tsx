@@ -6,6 +6,7 @@ import { useToast } from '../components/Toast'
 import * as repo from '../data/repository'
 import { spreadsheetUrl, normalizeAndValidateSpreadsheetId } from '../services/sheetsClient'
 import { downloadTextFile } from '../utils/csv'
+import { formatDateTime } from '../utils/format'
 
 export default function Settings() {
 	const {
@@ -147,7 +148,7 @@ export default function Settings() {
 					</div>
 					<button className="btn btn-primary" onClick={handleSavePicking} disabled={inFlight !== null}>Save</button>
 				</header>
-				<div className="row" style={{ gap: 24, alignItems: 'flex-start' }}>
+				<div className="field-grid">
 					<div className="field">
 						<label htmlFor="set-n">Students per check (N)</label>
 						<input id="set-n" className="input" type="number" min={1} style={{ width: 110 }}
@@ -204,7 +205,7 @@ export default function Settings() {
 						<input
 							id="set-sheet"
 							className="input"
-							style={{ width: 380 }}
+							style={{ flex: '1 1 300px', maxWidth: 480 }}
 							placeholder="Paste a spreadsheet URL or ID (optional)"
 							value={spreadsheetIdInput}
 							onChange={(e) => setSpreadsheetIdInput(e.target.value)}
@@ -221,7 +222,7 @@ export default function Settings() {
 					<span className="hint">
 						{linkedSpreadsheetId
 							? lastExportedAt
-								? `Last exported ${new Date(lastExportedAt).toLocaleString()}.`
+								? `Last exported ${formatDateTime(lastExportedAt)}.`
 								: 'Linked, but never exported yet.'
 							: 'No sheet linked. Exporting creates a new spreadsheet automatically.'}
 					</span>

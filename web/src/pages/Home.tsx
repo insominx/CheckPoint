@@ -6,6 +6,7 @@ import { useToast } from '../components/Toast'
 import * as repo from '../data/repository'
 import { computeCarryovers } from '../domain/attendance'
 import { downloadTextFile } from '../utils/csv'
+import { formatDateTime } from '../utils/format'
 
 interface ClassStats {
 	students: number
@@ -119,7 +120,7 @@ export default function Home() {
 							<h2>{selectedClass.name}</h2>
 							<p className="desc">
 								{stats?.lastSessionDate
-									? `Last check: ${new Date(stats.lastSessionDate).toLocaleString()}`
+									? `Last check: ${formatDateTime(stats.lastSessionDate)}`
 									: 'No sessions yet.'}
 							</p>
 						</div>
@@ -193,7 +194,7 @@ export default function Home() {
 												<button className="btn btn-sm" onClick={() => void handleExport(c.id)} disabled={inFlight !== null}>
 													Export
 												</button>
-												<button className="btn btn-sm btn-danger" onClick={() => handleDelete(c.id, c.name)} disabled={inFlight !== null}>
+												<button className="btn btn-sm btn-ghost-danger" onClick={() => handleDelete(c.id, c.name)} disabled={inFlight !== null}>
 													Delete
 												</button>
 											</div>
@@ -205,7 +206,7 @@ export default function Home() {
 					</div>
 				)}
 
-				<div className="row">
+				<div className="row create-row">
 					<input
 						className="input"
 						style={{ width: 280 }}

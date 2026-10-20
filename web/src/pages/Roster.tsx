@@ -244,12 +244,12 @@ export default function Roster() {
 										{s.absenceCount > 0 ? (
 											<span className="badge badge-danger">{s.absenceCount}</span>
 										) : (
-											<span className="badge badge-muted">0</span>
+											<span className="zero">0</span>
 										)}
 									</td>
 									<td style={{ textAlign: 'right' }}>
 										<button
-											className="btn btn-sm btn-danger"
+											className="btn btn-sm btn-ghost-danger"
 											disabled={busy}
 											onClick={() => void handleRemove(s)}
 										>

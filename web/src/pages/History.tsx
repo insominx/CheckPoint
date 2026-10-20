@@ -4,6 +4,7 @@ import { useConfirm } from '../components/Dialog'
 import { useToast } from '../components/Toast'
 import * as repo from '../data/repository'
 import { exportAbsencesCsv } from '../utils/csv'
+import { formatDateTime } from '../utils/format'
 import type { AbsenceReason } from '../types'
 import { reduceExpansion, shouldCommitHistoryDetails, shouldCommitHistoryRows } from './historyExpansion'
 
@@ -138,7 +139,7 @@ export default function History() {
 	const handleDeleteSession = async (sessionId: string, date: string) => {
 		const proceed = await confirm({
 			title: 'Delete this session?',
-			message: `The session from ${new Date(date).toLocaleString()} and its absence records will be removed.`,
+			message: `The session from ${formatDateTime(date)} and its absence records will be removed.`,
 			confirmLabel: 'Delete session',
 			danger: true,
 		})
@@ -186,14 +187,14 @@ export default function History() {
 							{rows.map((r) => (
 								<Fragment key={r.id}>
 									<tr className="clickable" onClick={() => handleExpand(r.id)}>
-										<td className="muted">{expansion.kind !== 'closed' && expansion.sessionId === r.id ? '▾' : '▸'}</td>
-										<td>{new Date(r.date).toLocaleString()}</td>
+										<td><span className={`chevron ${expansion.kind !== 'closed' && expansion.sessionId === r.id ? 'open' : ''}`}>▸</span></td>
+										<td style={{ fontWeight: 550 }}>{formatDateTime(r.date)}</td>
 										<td className="num">{r.picks}</td>
 										<td className="num">{r.present}</td>
-										<td className="num">{r.absent > 0 ? <span className="badge badge-danger">{r.absent}</span> : 0}</td>
+										<td className="num">{r.absent > 0 ? <span className="badge badge-danger">{r.absent}</span> : <span className="zero">0</span>}</td>
 										<td style={{ textAlign: 'right' }}>
 											<button
-												className="btn btn-sm btn-ghost"
+												className="btn btn-sm btn-ghost-danger"
 												onClick={(e) => {
 													e.stopPropagation()
 													handleDeleteSession(r.id, r.date)
@@ -206,7 +207,7 @@ export default function History() {
 									{expansion.kind === 'open' && expansion.sessionId === r.id && (
 										<tr className="expand-row">
 											<td colSpan={6}>
-												<p className="faint" style={{ marginBottom: 10 }}>Click a status to correct it — the absence ledger stays in sync.</p>
+												<p className="faint" style={{ marginBottom: 12 }}>Use the buttons to correct a mark — the absence ledger stays in sync.</p>
 												<div className="cards">
 													{expansion.details.session.picks.map((sid) => {
 														const mark = expansion.details.session.marks[sid]

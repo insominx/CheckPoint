@@ -4,6 +4,7 @@ import { useStore } from '../store'
 import { useConfirm } from '../components/Dialog'
 import { useToast } from '../components/Toast'
 import * as repo from '../data/repository'
+import { formatDateTime } from '../utils/format'
 import type { AbsenceReason } from '../types'
 import { drawFailureMessage, shouldAutoDraw, shouldCommitStudentInfo } from './sessionDraw'
 
@@ -202,7 +203,7 @@ export default function Session() {
 
 			{isResumedDraft && (
 				<div className="banner">
-					<span>Resuming an unsaved session from {new Date(currentSession.date).toLocaleString()}.</span>
+					<span>Resuming an unsaved session from {formatDateTime(currentSession.date)}.</span>
 					<button className="btn btn-sm" onClick={handleDiscard}>Discard</button>
 				</div>
 			)}
