@@ -137,3 +137,17 @@ export function countAbsencesByStudent(ledger: LedgerEntry[]): Map<string, numbe
     }
     return counts
 }
+
+/**
+ * Build a per-student map of the most recent absence date (ISO string) from ledger entries.
+ */
+export function latestAbsenceByStudent(ledger: LedgerEntry[]): Map<string, string> {
+    const latest = new Map<string, string>()
+    for (const entry of ledger) {
+        const current = latest.get(entry.studentId)
+        if (!current || Date.parse(entry.date) > Date.parse(current)) {
+            latest.set(entry.studentId, entry.date)
+        }
+    }
+    return latest
+}

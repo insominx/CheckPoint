@@ -34,7 +34,10 @@
 
 ### 3. Session Workflow
 1. Select a class and click **Pick Students**
-2. Review the displayed students (carryovers + random picks)
+2. Review the displayed students in two sections, each sorted by name and sized for projection:
+   - **Absent last time**: carryovers, highlighted in amber, each showing its most recent absence date
+   - **Random check**: this session's random picks
+   - Absence totals are not shown on the Session page (they remain on Roster and History)
 3. Mark each student as **Present** or **Absent** (with excused/unexcused reason)
 4. **Re-draw** regenerates the random portion (carryovers stay). If you have already marked any students, the app will confirm and **clear marks** before regenerating picks.
 5. **Save** finalizes the session and updates all records

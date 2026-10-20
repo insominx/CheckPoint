@@ -6,7 +6,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { db } from './db'
 import type { AbsenceLedgerItem, AbsenceReason, ClassEntity, Mark, PerClassSettings, SessionEntity, StudentEntity } from '../types'
 import { DEFAULT_COOLDOWN_WEIGHT, DEFAULT_N, DEFAULT_NEVER_SEEN_WEIGHT } from '../domain/sessionDraft'
-import { countAbsencesByStudent } from '../domain/attendance'
+import { countAbsencesByStudent, latestAbsenceByStudent } from '../domain/attendance'
 import { eraseStudentFromRecords, keepEnrolledInSession } from '../domain/studentRemoval'
 
 // ---------- Classes ----------
@@ -79,13 +79,14 @@ export function getStudents(classId: string): Promise<StudentEntity[]> {
 	return db.students.where('classId').equals(classId).toArray()
 }
 
-export async function getStudentsWithAbsenceCounts(classId: string): Promise<Array<StudentEntity & { absenceCount: number }>> {
+export async function getStudentsWithAbsenceCounts(classId: string): Promise<Array<StudentEntity & { absenceCount: number; lastAbsenceDate?: string }>> {
 	const [students, ledger] = await Promise.all([
 		db.students.where('classId').equals(classId).toArray(),
 		db.ledger.where('classId').equals(classId).toArray(),
 	])
 	const counts = countAbsencesByStudent(ledger)
-	return students.map((s) => ({ ...s, absenceCount: counts.get(s.id) ?? 0 }))
+	const latest = latestAbsenceByStudent(ledger)
+	return students.map((s) => ({ ...s, absenceCount: counts.get(s.id) ?? 0, lastAbsenceDate: latest.get(s.id) }))
 }
 
 /**

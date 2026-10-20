@@ -9,7 +9,7 @@ import { drawFailureMessage, shouldAutoDraw, shouldCommitStudentInfo } from './s
 
 interface StudentInfo {
 	displayName: string
-	absenceCount: number
+	lastAbsenceDate?: string
 }
 
 export default function Session() {
@@ -21,7 +21,7 @@ export default function Session() {
 		pickStudents, redrawRandom, markStudent, saveSession, discardDraft,
 	} = useStore()
 	const classId = selectedClass?.id
-	const [studentInfo, setStudentInfo] = useState<Record<string, StudentInfo>>({})
+	const [studentInfo, setStudentInfo] = useState<Record<string, StudentInfo> | null>(null)
 	const [reasonById, setReasonById] = useState<Record<string, AbsenceReason>>({})
 	const [drawFailure, setDrawFailure] = useState<string | null>(null)
 	const lastAttemptedClass = useRef<string | undefined>(undefined)
@@ -55,12 +55,12 @@ export default function Session() {
 
 	useEffect(() => {
 		let isMounted = true
-		setStudentInfo({})
+		setStudentInfo(null)
 		if (!classId) return () => { isMounted = false }
 		void repo.getStudentsWithAbsenceCounts(classId).then((students) => {
 			if (!shouldCommitStudentInfo({ requestedClassId: classId, currentClassId: useStore.getState().selectedClass?.id, isMounted })) return
 			const info: Record<string, StudentInfo> = {}
-			for (const s of students) info[s.id] = { displayName: s.displayName, absenceCount: s.absenceCount }
+			for (const s of students) info[s.id] = { displayName: s.displayName, lastAbsenceDate: s.lastAbsenceDate }
 			setStudentInfo(info)
 		})
 		return () => { isMounted = false }
@@ -93,6 +93,62 @@ export default function Session() {
 	const absentCount = picks.filter((sid) => currentSession.marks[sid]?.status === 'absent').length
 	const actionBusy = inFlight !== null
 	const isResumedDraft = Date.now() - Date.parse(currentSession.date) > 2 * 60 * 60 * 1000
+	const byName = (a: string, b: string) =>
+		(studentInfo?.[a]?.displayName ?? a).localeCompare(studentInfo?.[b]?.displayName ?? b)
+	const rechecks = picks.filter((sid) => carryoverSet.has(sid)).sort(byName)
+	const randoms = picks.filter((sid) => !carryoverSet.has(sid)).sort(byName)
+
+	const renderCard = (sid: string) => {
+		const info = studentInfo?.[sid]
+		const mark = currentSession.marks[sid]
+		const isPresent = mark?.status === 'present'
+		const isAbsent = mark?.status === 'absent'
+		const isCarryover = carryoverSet.has(sid)
+		return (
+			<div
+				key={sid}
+				className={`student-card ${isCarryover ? 'carryover' : ''} ${isPresent ? 'marked-present' : ''} ${isAbsent ? 'marked-absent' : ''}`}
+			>
+				<div className="name">
+					<span>{info?.displayName ?? sid}</span>
+					{isCarryover && <span className="badge badge-warn">recheck</span>}
+				</div>
+				{isCarryover && info?.lastAbsenceDate && (
+					<div className="meta">
+						Last absent {new Date(info.lastAbsenceDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+					</div>
+				)}
+				<div className="mark-buttons">
+					<button
+						className={`mark-btn present ${isPresent ? 'on' : ''}`}
+						onClick={() => markStudent(sid, { status: 'present' })}
+					>
+						Present
+					</button>
+					<button
+						className={`mark-btn absent ${isAbsent ? 'on' : ''}`}
+						onClick={() => markStudent(sid, { status: 'absent', reason: reasonById[sid] ?? 'unexcused' })}
+					>
+						Absent
+					</button>
+				</div>
+				{isAbsent && (
+					<select
+						className="select"
+						value={reasonById[sid] ?? mark?.reason ?? 'unexcused'}
+						onChange={(e) => {
+							const reason = e.target.value as AbsenceReason
+							setReasonById({ ...reasonById, [sid]: reason })
+							markStudent(sid, { status: 'absent', reason })
+						}}
+					>
+						<option value="unexcused">Unexcused</option>
+						<option value="excused">Excused</option>
+					</select>
+				)}
+			</div>
+		)
+	}
 
 	const handleRedraw = async () => {
 		const hasMarks = Object.keys(currentSession.marks || {}).length > 0
@@ -172,60 +228,29 @@ export default function Session() {
 					<p>This class has no students to draw from. Import a roster first.</p>
 					<button className="btn" onClick={() => navigate('/roster')}>Go to Roster</button>
 				</div>
+			) : !studentInfo ? (
+				<p className="pick-section-note">Loading students…</p>
 			) : (
-				<div className="cards">
-					{picks.map((sid) => {
-						const info = studentInfo[sid]
-						const mark = currentSession.marks[sid]
-						const isPresent = mark?.status === 'present'
-						const isAbsent = mark?.status === 'absent'
-						const isCarryover = carryoverSet.has(sid)
-						return (
-							<div
-								key={sid}
-								className={`student-card ${isCarryover ? 'carryover' : ''} ${isPresent ? 'marked-present' : ''} ${isAbsent ? 'marked-absent' : ''}`}
-							>
-								<div className="name">
-									<span>{info?.displayName ?? sid}</span>
-									{isCarryover && <span className="badge badge-warn">recheck</span>}
-								</div>
-								<div className="meta">
-									{(info?.absenceCount ?? 0) > 0
-										? `${info?.absenceCount} recorded absence${info?.absenceCount === 1 ? '' : 's'}`
-										: 'No absences recorded'}
-								</div>
-								<div className="mark-buttons">
-									<button
-										className={`mark-btn present ${isPresent ? 'on' : ''}`}
-										onClick={() => markStudent(sid, { status: 'present' })}
-									>
-										Present
-									</button>
-									<button
-										className={`mark-btn absent ${isAbsent ? 'on' : ''}`}
-										onClick={() => markStudent(sid, { status: 'absent', reason: reasonById[sid] ?? 'unexcused' })}
-									>
-										Absent
-									</button>
-								</div>
-								{isAbsent && (
-									<select
-										className="select"
-										value={reasonById[sid] ?? mark?.reason ?? 'unexcused'}
-										onChange={(e) => {
-											const reason = e.target.value as AbsenceReason
-											setReasonById({ ...reasonById, [sid]: reason })
-											markStudent(sid, { status: 'absent', reason })
-										}}
-									>
-										<option value="unexcused">Unexcused</option>
-										<option value="excused">Excused</option>
-									</select>
-								)}
-							</div>
-						)
-					})}
-				</div>
+				<>
+					{rechecks.length > 0 && (
+						<section className="pick-section rechecks">
+							<h2>
+								Absent last time — please confirm you're here
+								<span className="pick-section-count">{rechecks.length}</span>
+							</h2>
+							<div className="cards">{rechecks.map(renderCard)}</div>
+						</section>
+					)}
+					<section className="pick-section">
+						<h2>
+							Random check
+							<span className="pick-section-count">{randoms.length}</span>
+						</h2>
+						{randoms.length > 0
+							? <div className="cards">{randoms.map(renderCard)}</div>
+							: <p className="pick-section-note">No random picks this time.</p>}
+					</section>
+				</>
 			)}
 		</div>
 	)

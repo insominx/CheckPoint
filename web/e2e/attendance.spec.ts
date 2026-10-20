@@ -64,7 +64,9 @@ test('core attendance loop with carryover recheck', async ({ page }) => {
 	await expect(carryoverCard).toHaveCount(1)
 	await expect(carryoverCard).toContainText(absentName)
 	await expect(carryoverCard.locator('.badge')).toHaveText('recheck')
-	await expect(carryoverCard).toContainText('1 recorded absence')
+	await expect(carryoverCard).toContainText('Last absent')
+	await expect(page.getByRole('heading', { name: /Absent last time/ })).toBeVisible()
+	await expect(page.locator('.pick-section.rechecks .student-card')).toHaveCount(1)
 	await shot(page, '05-carryover')
 
 	// Mark everyone present and save

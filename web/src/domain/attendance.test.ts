@@ -5,6 +5,7 @@ import {
     isCarryover,
     countAbsences,
     countAbsencesByStudent,
+    latestAbsenceByStudent,
 } from './attendance'
 
 describe('computeCarryovers', () => {
@@ -175,5 +176,24 @@ describe('countAbsencesByStudent', () => {
     it('returns an empty map when ledger is empty', () => {
         const result = countAbsencesByStudent([])
         expect(result.size).toBe(0)
+    })
+})
+
+describe('latestAbsenceByStudent', () => {
+    it('returns the most recent absence date per student regardless of ledger order', () => {
+        const ledger = [
+            { studentId: 's1', date: '2024-01-17T10:00:00Z' },
+            { studentId: 's1', date: '2024-01-10T10:00:00Z' },
+            { studentId: 's2', date: '2024-01-03T10:00:00Z' },
+            { studentId: 's2', date: '2024-01-24T10:00:00Z' },
+        ]
+        const result = latestAbsenceByStudent(ledger)
+        expect(result.get('s1')).toBe('2024-01-17T10:00:00Z')
+        expect(result.get('s2')).toBe('2024-01-24T10:00:00Z')
+        expect(result.get('s3')).toBeUndefined()
+    })
+
+    it('returns an empty map for an empty ledger', () => {
+        expect(latestAbsenceByStudent([]).size).toBe(0)
     })
 })
